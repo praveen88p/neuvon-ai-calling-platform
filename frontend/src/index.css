@@ -1,0 +1,59 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --card: #fcfcfc;
+    --ring: #644a40;
+    --input: #d8d8d8;
+    --muted: #efefef;
+    --accent: #e8e8e8;
+    --border: #d8d8d8;
+    --radius: 0.5rem;
+    --chart-1: #644a40;
+    --chart-2: #ffdfb5;
+    --chart-3: #e8e8e8;
+    --chart-4: #ffe6c4;
+    --chart-5: #66493e;
+    --popover: #fcfcfc;
+    --primary: #644a40;
+    --sidebar-background: #fbfbfb;
+    --secondary: #ffdfb5;
+    --background: #f9f9f9;
+    --foreground: #202020;
+    --destructive: #e54d2e;
+    --sidebar-ring: #b5b5b5;
+    --sidebar-accent: #f7f7f7;
+    --sidebar-border: #ebebeb;
+    --card-foreground: #202020;
+    --sidebar-primary: #343434;
+    --muted-foreground: #646464;
+    --accent-foreground: #202020;
+    --popover-foreground: #202020;
+    --primary-foreground: #ffffff;
+    --sidebar-foreground: #252525;
+    --secondary-foreground: #582d1d;
+    --destructive-foreground: #ffffff;
+    --sidebar-accent-foreground: #343434;
+    --sidebar-primary-foreground: #fbfbfb;
+
+    /* Semantic status colors */
+    --success: #16a34a;
+    --success-foreground: #ffffff;
+    --warning: #f59e0b;
+    --warning-foreground: #ffffff;
+  }
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+
+  body {
+    background-color: var(--background);
+    color: var(--foreground);
+    font-family: 'Inter', sans-serif;
+  }
+}

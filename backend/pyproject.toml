@@ -1,0 +1,15 @@
+[project]
+name = "neuvon-backend"
+version = "0.1.0"
+description = "Neuvon AI Calling Platform — Backend API"
+requires-python = ">=3.12"
+
+[tool.fastapi]
+entrypoint = "app.main:app"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]

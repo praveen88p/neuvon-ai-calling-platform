@@ -1,0 +1,484 @@
+from __future__ import annotations
+
+import json
+from datetime import datetime, timezone
+
+from fastapi import HTTPException, status
+
+from app.core.logging import logger
+from app.core.posthog import track_event
+from app.integrations.dograh_client import DograhClient
+from app.integrations.insforge_client import get_insforge_admin
+from app.schemas.auth import UserContext
+from app.schemas.call import (
+    CallHistoryItem,
+    CallHistoryResponse,
+    CallRunResponse,
+    CallTrigger,
+    CallTriggerResponse,
+    DownloadUrlResponse,
+)
+
+
+class CallService:
+    """Business logic for outbound call triggering and run retrieval.
+
+    Validates org access, checks usage quotas, proxies to Dograh,
+    creates local call_runs records, and fires PostHog events.
+    """
+
+    def __init__(self) -> None:
+        self.dograh = DograhClient()
+        self.db = get_insforge_admin()
+
+    async def trigger_call(
+        self, data: CallTrigger, current_user: UserContext
+    ) -> CallTriggerResponse:
+        """Trigger an outbound call via Dograh."""
+
+        mapping = await self._get_agent_mapping(data.workflow_id, current_user)
+        workflow_uuid = mapping.get("dograh_workflow_uuid")
+        if not workflow_uuid:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Agent has no workflow UUID — cannot trigger calls",
+            )
+
+        try:
+            result = await self.dograh.trigger_call(
+                workflow_uuid=workflow_uuid,
+                phone_number=data.phone_number,
+                initial_context=data.initial_context,
+                telephony_configuration_id=data.telephony_configuration_id,
+            )
+        except Exception as exc:
+            logger.error(
+                "call.trigger_failed",
+                org_id=current_user.organization_id,
+                workflow_id=data.workflow_id,
+                error=str(exc),
+            )
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Failed to trigger call via Dograh",
+            ) from exc
+
+        run_id = result.get("workflow_run_id")
+        run_name = result.get("workflow_run_name")
+        call_status = result.get("status", "initiated")
+
+        await self._create_call_run_record(
+            run_id=run_id,
+            workflow_id=data.workflow_id,
+            phone_number=data.phone_number,
+            initial_context=data.initial_context,
+            org_id=current_user.organization_id,
+            call_status=call_status,
+        )
+
+        track_event(
+            distinct_id=current_user.organization_id,
+            event="call_triggered",
+            properties={
+                "org_id": current_user.organization_id,
+                "agent_id": str(data.workflow_id),
+                "call_type": "outbound",
+            },
+        )
+
+        logger.info(
+            "call.triggered",
+            org_id=current_user.organization_id,
+            workflow_id=data.workflow_id,
+            run_id=run_id,
+        )
+
+        return CallTriggerResponse(
+            run_id=run_id,
+            workflow_run_name=run_name,
+            status=call_status,
+            phone_number=data.phone_number,
+            workflow_id=data.workflow_id,
+            organization_id=current_user.organization_id,
+        )
+
+    async def get_call_run(
+        self, run_id: int, current_user: UserContext
+    ) -> CallRunResponse:
+        """Get full call run details from Dograh, scoped to org."""
+        local_run = await self._get_local_run_or_none(run_id, current_user.organization_id)
+
+        if local_run:
+            workflow_id = local_run["dograh_workflow_id"]
+        else:
+            # Campaign-originated calls have no local record.
+            # Find the workflow_id by trying all agents mapped to this org.
+            workflow_id = await self._find_workflow_for_run(run_id, current_user.organization_id)
+            if not workflow_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Call run not found in this organization",
+                )
+
+        try:
+            dograh_run = await self.dograh.get_run(workflow_id, run_id)
+        except Exception as exc:
+            logger.error("call.run_fetch_failed", run_id=run_id, error=str(exc))
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Failed to fetch call details from Dograh",
+            ) from exc
+
+        # Dograh nests phone/caller/disposition inside initial_context and gathered_context
+        ic = dograh_run.get("initial_context") or {}
+        gc = dograh_run.get("gathered_context") or {}
+        ci = dograh_run.get("cost_info") or {}
+
+        # Derive status
+        if gc.get("error"):
+            run_status = "failed"
+        elif dograh_run.get("is_completed"):
+            run_status = "completed"
+        else:
+            run_status = local_run.get("status", "in_progress") if local_run else "in_progress"
+
+        phone_number = (
+            (local_run.get("phone_number") if local_run else None)
+            or ic.get("phone_number")
+            or ic.get("called_number")
+        )
+
+        return CallRunResponse(
+            run_id=dograh_run.get("id", run_id),
+            workflow_id=workflow_id,
+            organization_id=current_user.organization_id,
+            name=dograh_run.get("name"),
+            status=run_status,
+            is_completed=dograh_run.get("is_completed", False),
+            call_type=dograh_run.get("call_type"),
+            phone_number=phone_number,
+            caller_number=ic.get("caller_number", dograh_run.get("caller_number")),
+            duration_seconds=ci.get("call_duration_seconds", dograh_run.get("call_duration_seconds")),
+            initial_context=dograh_run.get("initial_context"),
+            gathered_context=dograh_run.get("gathered_context"),
+            transcript_url=dograh_run.get("transcript_url"),
+            recording_url=dograh_run.get("recording_url"),
+            transcript_public_url=dograh_run.get("transcript_public_url"),
+            recording_public_url=dograh_run.get("recording_public_url"),
+            public_access_token=dograh_run.get("public_access_token"),
+            cost_info=dograh_run.get("cost_info"),
+            annotations=dograh_run.get("annotations"),
+            created_at=dograh_run.get("created_at"),
+        )
+
+    # --- Call History (Feature 09) ---
+
+    async def list_history(
+        self,
+        current_user: UserContext,
+        *,
+        page: int = 1,
+        limit: int = 20,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        agent_id: int | None = None,
+        campaign_id: int | None = None,
+        caller_number: str | None = None,
+        called_number: str | None = None,
+        disposition: list[str] | None = None,
+        min_duration: int | None = None,
+        max_duration: int | None = None,
+    ) -> CallHistoryResponse:
+        """Paginated call history with filters from Dograh."""
+        org_id = current_user.organization_id
+
+        # Build Dograh query params
+        params: dict = {"page": page, "limit": min(limit, 100)}
+
+        if start_date:
+            params["start_date"] = start_date
+        if end_date:
+            params["end_date"] = end_date
+
+        # Build Dograh-compatible filter objects
+        filters: list[dict] = []
+
+        if agent_id is not None:
+            filters.append({
+                "attribute": "workflowId",
+                "type": "number",
+                "value": {"value": agent_id},
+            })
+        if campaign_id is not None:
+            filters.append({
+                "attribute": "campaignId",
+                "type": "number",
+                "value": {"value": campaign_id},
+            })
+        if caller_number:
+            filters.append({
+                "attribute": "callerNumber",
+                "type": "text",
+                "value": {"value": caller_number},
+            })
+        if called_number:
+            filters.append({
+                "attribute": "calledNumber",
+                "type": "text",
+                "value": {"value": called_number},
+            })
+        if disposition:
+            filters.append({
+                "attribute": "dispositionCode",
+                "type": "multiSelect",
+                "value": {"codes": disposition},
+            })
+        if min_duration is not None or max_duration is not None:
+            filters.append({
+                "attribute": "duration",
+                "type": "numberRange",
+                "value": {
+                    "min": min_duration or 0,
+                    "max": max_duration or 99999,
+                },
+            })
+
+        if filters:
+            params["filters"] = json.dumps(filters)
+
+        try:
+            result = await self.dograh.list_runs(params=params)
+        except Exception as exc:
+            logger.error("call.history_failed", org_id=org_id, error=str(exc))
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Failed to fetch call history",
+            ) from exc
+
+        # Normalize result — Dograh may return list or dict with runs key
+        if isinstance(result, list):
+            raw_runs = result
+            total = len(raw_runs)
+        else:
+            raw_runs = result.get("runs", result.get("data", []))
+            total = result.get("total", result.get("count", len(raw_runs)))
+
+        runs = [
+            CallHistoryItem(
+                run_id=r.get("id", 0),
+                workflow_id=r.get("workflow_id"),
+                workflow_name=r.get("workflow_name"),
+                campaign_id=r.get("campaign_id"),
+                campaign_name=r.get("campaign_name"),
+                call_type=r.get("call_type"),
+                status=r.get("status"),
+                disposition_code=r.get("disposition_code"),
+                phone_number=r.get("phone_number", r.get("called_number")),
+                caller_number=r.get("caller_number"),
+                duration_seconds=r.get("call_duration_seconds", r.get("duration")),
+                cost=r.get("cost"),
+                recording_url=r.get("recording_url"),
+                transcript_url=r.get("transcript_url"),
+                public_access_token=r.get("public_access_token"),
+                created_at=r.get("created_at"),
+                completed_at=r.get("completed_at"),
+            )
+            for r in raw_runs
+        ]
+
+        return CallHistoryResponse(
+            runs=runs,
+            total=total,
+            page=page,
+            limit=limit,
+            has_more=(page * limit) < total,
+        )
+
+    async def get_recording_url(
+        self, run_id: int, current_user: UserContext,
+    ) -> DownloadUrlResponse:
+        """Get recording download URL for a call run."""
+        local_run = await self._get_local_run(run_id, current_user.organization_id)
+        workflow_id = local_run["dograh_workflow_id"]
+
+        try:
+            dograh_run = await self.dograh.get_run(workflow_id, run_id)
+        except Exception as exc:
+            logger.error("call.recording_url_failed", run_id=run_id, error=str(exc))
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Failed to fetch recording URL",
+            ) from exc
+
+        recording_url = (
+            dograh_run.get("recording_public_url")
+            or dograh_run.get("recording_url")
+            or ""
+        )
+        if not recording_url:
+            token = dograh_run.get("public_access_token", "")
+            if token:
+                recording_url = f"{self.dograh.base_url}/api/v1/public/download/workflow/{token}/recording"
+
+        if not recording_url:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No recording available for this call",
+            )
+
+        return DownloadUrlResponse(url=recording_url, run_id=run_id, type="recording")
+
+    async def get_transcript_url(
+        self, run_id: int, current_user: UserContext,
+    ) -> DownloadUrlResponse:
+        """Get transcript download URL for a call run."""
+        local_run = await self._get_local_run(run_id, current_user.organization_id)
+        workflow_id = local_run["dograh_workflow_id"]
+
+        try:
+            dograh_run = await self.dograh.get_run(workflow_id, run_id)
+        except Exception as exc:
+            logger.error("call.transcript_url_failed", run_id=run_id, error=str(exc))
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Failed to fetch transcript URL",
+            ) from exc
+
+        transcript_url = (
+            dograh_run.get("transcript_public_url")
+            or dograh_run.get("transcript_url")
+            or ""
+        )
+        if not transcript_url:
+            token = dograh_run.get("public_access_token", "")
+            if token:
+                transcript_url = f"{self.dograh.base_url}/api/v1/public/download/workflow/{token}/transcript"
+
+        if not transcript_url:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No transcript available for this call",
+            )
+
+        return DownloadUrlResponse(url=transcript_url, run_id=run_id, type="transcript")
+
+    # --- Internal helpers ---
+
+    async def _get_agent_mapping(
+        self, workflow_id: int, current_user: UserContext
+    ) -> dict:
+        """Verify agent belongs to org and return the mapping."""
+        try:
+            rows = await self.db.database.from_("dograh_agent_mappings") \
+                .select("dograh_workflow_uuid,dograh_workflow_id") \
+                .eq("dograh_workflow_id", workflow_id) \
+                .eq("organization_id", current_user.organization_id) \
+                .execute()
+            rows = rows if isinstance(rows, list) else []
+        except Exception as exc:
+            logger.error("call.agent_check_failed", error=str(exc))
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to verify agent access",
+            ) from exc
+
+        if not rows:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Agent not found in this organization",
+            )
+
+        return rows[0]
+
+    async def _create_call_run_record(
+        self,
+        run_id: int,
+        workflow_id: int,
+        phone_number: str,
+        initial_context: dict | None,
+        org_id: str,
+        call_status: str,
+    ) -> None:
+        """Create local call_runs record for tracking."""
+
+        try:
+            await self.db.database.from_("call_runs").insert(
+                [{
+                    "organization_id": org_id,
+                    "dograh_run_id": run_id,
+                    "dograh_workflow_id": workflow_id,
+                    "call_type": "outbound",
+                    "status": call_status,
+                    "phone_number": phone_number,
+                    "initial_context": json.dumps(initial_context) if initial_context else None,
+                }]
+            )
+        except Exception as exc:
+            logger.warning("call.local_record_failed", run_id=run_id, error=str(exc))
+
+    async def _get_local_run(self, run_id: int, org_id: str) -> dict:
+        """Get local call_runs record, scoped to org."""
+        try:
+            rows = await self.db.database.from_("call_runs") \
+                .select("*") \
+                .eq("dograh_run_id", run_id) \
+                .eq("organization_id", org_id) \
+                .execute()
+            rows = rows if isinstance(rows, list) else []
+        except Exception as exc:
+            logger.error("call.local_fetch_failed", run_id=run_id, error=str(exc))
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to fetch call record",
+            ) from exc
+
+        if not rows:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Call run not found in this organization",
+            )
+
+        return rows[0]
+
+    async def _get_local_run_or_none(self, run_id: int, org_id: str) -> dict | None:
+        """Get local call_runs record if it exists, or None for campaign-originated calls."""
+        try:
+            rows = await self.db.database.from_("call_runs") \
+                .select("*") \
+                .eq("dograh_run_id", run_id) \
+                .eq("organization_id", org_id) \
+                .execute()
+            rows = rows if isinstance(rows, list) else []
+        except Exception as exc:
+            logger.warning("call.local_fetch_failed", run_id=run_id, error=str(exc))
+            return None
+
+        return rows[0] if rows else None
+
+    async def _find_workflow_for_run(self, run_id: int, org_id: str) -> int | None:
+        """Find the workflow_id for a run by trying all agents mapped to this org.
+
+        Campaign-originated calls have no local record, so we need to check
+        each of the org's agents in Dograh to find which one owns this run.
+        """
+        try:
+            mappings = await self.db.database.from_("dograh_agent_mappings") \
+                .select("dograh_workflow_id") \
+                .eq("organization_id", org_id) \
+                .execute()
+            mappings = mappings if isinstance(mappings, list) else []
+        except Exception as exc:
+            logger.error("call.workflow_lookup_failed", run_id=run_id, error=str(exc))
+            return None
+
+        for mapping in mappings:
+            wf_id = mapping.get("dograh_workflow_id")
+            if not wf_id:
+                continue
+            try:
+                await self.dograh.get_run(wf_id, run_id)
+                return wf_id
+            except Exception:
+                continue
+
+        return None

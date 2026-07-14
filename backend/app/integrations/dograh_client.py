@@ -1,0 +1,296 @@
+from __future__ import annotations
+
+import httpx
+
+from app.core.config import get_settings
+from app.core.logging import logger
+
+
+class DograhClient:
+    """Async HTTP client for all Dograh API communication.
+
+    All Dograh communication goes through this class — never call Dograh
+    directly from services or routes. Uses HTTPX async client with
+    X-API-Key header authentication.
+    """
+
+    def __init__(self) -> None:
+        settings = get_settings()
+        self.base_url = settings.DOGRAH_BASE_URL
+        self.api_key = settings.DOGRAH_API_KEY
+
+    async def _request(self, method: str, path: str, **kwargs) -> dict:
+        """Make authenticated request to Dograh API."""
+        url = f"{self.base_url}/api/v1{path}"
+        logger.info("dograh.request", method=method, path=path)
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.request(
+                method,
+                url,
+                headers={"X-API-Key": self.api_key},
+                **kwargs,
+            )
+            if response.status_code >= 400:
+                body = response.text[:500]
+                logger.error(
+                    "dograh.error_response",
+                    method=method,
+                    path=path,
+                    status=response.status_code,
+                    body=body,
+                )
+                raise httpx.HTTPStatusError(
+                    f"Dograh {method} {path} returned {response.status_code}: {body}",
+                    request=response.request,
+                    response=response,
+                )
+            return response.json()
+
+    async def _request_raw(self, method: str, path: str, **kwargs) -> httpx.Response:
+        """Make authenticated request returning raw response (for multipart, etc.)."""
+        url = f"{self.base_url}/api/v1{path}"
+        logger.info("dograh.request_raw", method=method, path=path)
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.request(
+                method,
+                url,
+                headers={"X-API-Key": self.api_key},
+                **kwargs,
+            )
+            response.raise_for_status()
+            return response
+
+    # --- Agent methods (Feature 05) ---
+
+    async def list_agents(self) -> dict:
+        """GET /workflow/fetch — list all agents."""
+        return await self._request("GET", "/workflow/fetch")
+
+    async def get_agent(self, workflow_id: int) -> dict:
+        """GET /workflow/fetch/{workflow_id} — get agent with full definition."""
+        return await self._request("GET", f"/workflow/fetch/{workflow_id}")
+
+    async def get_agent_count(self) -> dict:
+        """GET /workflow/count — agent count by status."""
+        return await self._request("GET", "/workflow/count")
+
+    async def create_agent_from_definition(
+        self, name: str, workflow_definition: dict
+    ) -> dict:
+        """POST /workflow/create/definition — create from explicit node/edge definition."""
+        return await self._request(
+            "POST",
+            "/workflow/create/definition",
+            json={"name": name, "workflow_definition": workflow_definition},
+        )
+
+    async def create_agent_from_template(
+        self, name: str, call_type: str, use_case: str, activity_description: str
+    ) -> dict:
+        """POST /workflow/create/template — create from natural language description."""
+        return await self._request(
+            "POST",
+            "/workflow/create/template",
+            json={
+                "name": name,
+                "call_type": call_type,
+                "use_case": use_case,
+                "activity_description": activity_description,
+            },
+        )
+
+    async def update_agent(self, workflow_id: int, data: dict) -> dict:
+        """PUT /workflow/{workflow_id} — update agent name, definition, or config."""
+        return await self._request("PUT", f"/workflow/{workflow_id}", json=data)
+
+    async def update_agent_status(
+        self, workflow_id: int, status: str
+    ) -> dict:
+        """PUT /workflow/{workflow_id}/status — archive or restore."""
+        return await self._request(
+            "PUT", f"/workflow/{workflow_id}/status", json={"status": status}
+        )
+
+    async def validate_agent(self, workflow_id: int) -> dict:
+        """POST /workflow/{workflow_id}/validate — validate without executing."""
+        return await self._request("POST", f"/workflow/{workflow_id}/validate")
+
+    async def create_test_run(self, workflow_id: int, data: dict | None = None) -> dict:
+        """POST /workflow/{workflow_id}/runs — test run without real call."""
+        return await self._request(
+            "POST", f"/workflow/{workflow_id}/runs", json=data or {}
+        )
+
+    async def list_workflow_runs(
+        self, workflow_id: int, params: dict | None = None
+    ) -> dict:
+        """GET /workflow/{workflow_id}/runs — list runs for a workflow."""
+        return await self._request(
+            "GET", f"/workflow/{workflow_id}/runs", params=params
+        )
+
+    # --- Call methods (Feature 06) ---
+
+    async def trigger_call(
+        self,
+        workflow_uuid: str,
+        phone_number: str,
+        initial_context: dict | None = None,
+        telephony_configuration_id: int | None = None,
+    ) -> dict:
+        """POST /public/agent/workflow/{uuid} — trigger outbound call by Agent UUID."""
+        body: dict = {"phone_number": phone_number}
+        if initial_context:
+            body["initial_context"] = initial_context
+        if telephony_configuration_id:
+            body["telephony_configuration_id"] = telephony_configuration_id
+        return await self._request(
+            "POST", f"/public/agent/workflow/{workflow_uuid}", json=body
+        )
+
+    async def get_run(self, workflow_id: int, run_id: int) -> dict:
+        """GET /workflow/{id}/runs/{run_id} — get run details."""
+        return await self._request("GET", f"/workflow/{workflow_id}/runs/{run_id}")
+
+    async def list_runs(self, params: dict | None = None) -> dict:
+        """GET /organizations/usage/runs — paginated run list with usage data."""
+        return await self._request("GET", "/organizations/usage/runs", params=params)
+
+    # --- Campaign methods (Feature 08) ---
+
+    async def get_presigned_upload_url(
+        self, file_name: str, file_size: int, content_type: str = "text/csv"
+    ) -> dict:
+        """POST /s3/presigned-upload-url — get S3 presigned URL for CSV upload."""
+        return await self._request(
+            "POST",
+            "/s3/presigned-upload-url",
+            json={
+                "file_name": file_name,
+                "file_size": file_size,
+                "content_type": content_type,
+            },
+        )
+
+    async def upload_to_s3(
+        self, upload_url: str, file_content: bytes, content_type: str = "text/csv"
+    ) -> None:
+        """PUT file content directly to the S3 presigned URL."""
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.put(
+                upload_url,
+                content=file_content,
+                headers={"Content-Type": content_type},
+            )
+            response.raise_for_status()
+
+    async def create_campaign(self, data: dict) -> dict:
+        """POST /campaign/create — create a campaign linked to a workflow and uploaded CSV."""
+        return await self._request("POST", "/campaign/create", json=data)
+
+    async def list_campaigns(self) -> dict:
+        """GET /campaign/fetch — list all campaigns."""
+        return await self._request("GET", "/campaign/fetch")
+
+    async def get_campaign(self, campaign_id: int) -> dict:
+        """GET /campaign/fetch/{campaign_id} — get a single campaign."""
+        return await self._request("GET", f"/campaign/fetch/{campaign_id}")
+
+    async def update_campaign(self, campaign_id: int, data: dict) -> dict:
+        """PUT /campaign/{campaign_id} — update campaign settings."""
+        return await self._request("PUT", f"/campaign/{campaign_id}", json=data)
+
+    async def start_campaign(self, campaign_id: int) -> dict:
+        """POST /campaign/{campaign_id}/start — start dialing contacts."""
+        return await self._request("POST", f"/campaign/{campaign_id}/start")
+
+    async def pause_campaign(self, campaign_id: int) -> dict:
+        """POST /campaign/{campaign_id}/pause — pause a running campaign."""
+        return await self._request("POST", f"/campaign/{campaign_id}/pause")
+
+    async def resume_campaign(self, campaign_id: int) -> dict:
+        """POST /campaign/{campaign_id}/resume — resume a paused campaign."""
+        return await self._request("POST", f"/campaign/{campaign_id}/resume")
+
+    async def get_campaign_progress(self, campaign_id: int) -> dict:
+        """GET /campaign/{campaign_id}/progress — get current progress stats."""
+        return await self._request("GET", f"/campaign/{campaign_id}/progress")
+
+    async def get_campaign_runs(self, campaign_id: int) -> dict:
+        """GET /campaign/{campaign_id}/runs — get run records for contacts."""
+        return await self._request("GET", f"/campaign/{campaign_id}/runs")
+
+    # --- Telephony methods (Feature 11) ---
+
+    async def get_telephony_providers(self) -> dict:
+        """GET /organizations/telephony-providers/metadata — supported providers."""
+        return await self._request("GET", "/organizations/telephony-providers/metadata")
+
+    async def list_telephony_configs(self) -> dict:
+        """GET /organizations/telephony-configs — list all configs."""
+        return await self._request("GET", "/organizations/telephony-configs")
+
+    async def create_telephony_config(self, data: dict) -> dict:
+        """POST /organizations/telephony-configs — create a config."""
+        return await self._request("POST", "/organizations/telephony-configs", json=data)
+
+    async def get_telephony_config(self, config_id: int) -> dict:
+        """GET /organizations/telephony-configs/{config_id}."""
+        return await self._request("GET", f"/organizations/telephony-configs/{config_id}")
+
+    async def update_telephony_config(self, config_id: int, data: dict) -> dict:
+        """PUT /organizations/telephony-configs/{config_id}."""
+        return await self._request("PUT", f"/organizations/telephony-configs/{config_id}", json=data)
+
+    async def delete_telephony_config(self, config_id: int) -> dict:
+        """DELETE /organizations/telephony-configs/{config_id}."""
+        return await self._request("DELETE", f"/organizations/telephony-configs/{config_id}")
+
+    async def set_default_outbound(self, config_id: int) -> dict:
+        """POST /organizations/telephony-configs/{config_id}/set-default-outbound."""
+        return await self._request(
+            "POST", f"/organizations/telephony-configs/{config_id}/set-default-outbound",
+        )
+
+    # --- Phone Number methods (Feature 11) ---
+
+    async def list_phone_numbers(self, config_id: int) -> dict:
+        """GET /organizations/telephony-configs/{config_id}/phone-numbers."""
+        return await self._request(
+            "GET", f"/organizations/telephony-configs/{config_id}/phone-numbers",
+        )
+
+    async def add_phone_number(self, config_id: int, data: dict) -> dict:
+        """POST /organizations/telephony-configs/{config_id}/phone-numbers."""
+        return await self._request(
+            "POST", f"/organizations/telephony-configs/{config_id}/phone-numbers", json=data,
+        )
+
+    async def get_phone_number(self, config_id: int, phone_number_id: int) -> dict:
+        """GET .../phone-numbers/{phone_number_id}."""
+        return await self._request(
+            "GET", f"/organizations/telephony-configs/{config_id}/phone-numbers/{phone_number_id}",
+        )
+
+    async def update_phone_number(self, config_id: int, phone_number_id: int, data: dict) -> dict:
+        """PUT .../phone-numbers/{phone_number_id}."""
+        return await self._request(
+            "PUT", f"/organizations/telephony-configs/{config_id}/phone-numbers/{phone_number_id}",
+            json=data,
+        )
+
+    async def delete_phone_number(self, config_id: int, phone_number_id: int) -> dict:
+        """DELETE .../phone-numbers/{phone_number_id}."""
+        return await self._request(
+            "DELETE", f"/organizations/telephony-configs/{config_id}/phone-numbers/{phone_number_id}",
+        )
+
+    async def set_default_caller(self, config_id: int, phone_number_id: int) -> dict:
+        """POST .../phone-numbers/{phone_number_id}/set-default-caller."""
+        return await self._request(
+            "POST",
+            f"/organizations/telephony-configs/{config_id}/phone-numbers/{phone_number_id}/set-default-caller",
+        )
+
