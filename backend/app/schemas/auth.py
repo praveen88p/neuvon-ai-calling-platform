@@ -33,7 +33,7 @@ class AuthTokens(BaseModel):
     """JWT token pair returned on login/register/refresh."""
 
     access_token: str
-    refresh_token: str
+    refresh_token: str | None = None
 
 
 class UserContext(BaseModel):

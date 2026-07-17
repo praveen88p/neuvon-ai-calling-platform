@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     # Webhook
     WEBHOOK_SECRET: str = ""
 
+    # Sentry
+    SENTRY_DSN: str = ""
+    ENVIRONMENT: str = "development"
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -76,7 +76,7 @@ class CallHistoryItem(BaseModel):
     run_id: int
     workflow_id: int | None = None
     workflow_name: str | None = None
-    campaign_id: int | None = None
+    campaign_id: str | None = None
     campaign_name: str | None = None
     call_type: str | None = None
     status: str | None = None

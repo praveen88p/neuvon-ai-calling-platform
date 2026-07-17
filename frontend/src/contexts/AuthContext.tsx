@@ -170,6 +170,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setToken(data.tokens.access_token);
     setUser(userData);
     persistAuth(data.tokens.access_token, data.tokens.refresh_token, userData);
+
+    // Identify user in Sentry for error tracking
+    try {
+      const Sentry = await import("@sentry/react");
+      Sentry.setUser({ email: userData.email, id: userData.id, username: userData.name });
+    } catch { /* Sentry not loaded */ }
   };
 
   const register = async (data: RegisterData) => {
@@ -196,6 +202,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setToken(null);
     setUser(null);
     clearAuth();
+
+    // Clear user from Sentry
+    import("@sentry/react").then(Sentry => Sentry.setUser(null)).catch(() => {});
   };
 
   return (

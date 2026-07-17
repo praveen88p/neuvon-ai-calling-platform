@@ -54,8 +54,6 @@ export const API_PATHS = {
   // ── Telephony ──
   TELEPHONY_PROVIDERS: "/api/v1/telephony/providers",
   TELEPHONY_CONFIGS: "/api/v1/telephony/configs",
-  TELEPHONY_CONFIG: "/api/v1/telephony/configs/default",
-  PHONE_NUMBERS: "/api/v1/telephony/phone-numbers",
 
   // ── Settings ──
   PROFILE: "/api/v1/settings/profile",
@@ -135,15 +133,23 @@ export const callTranscriptPath = (runId: number | string) =>
 export const appointmentPath = (id: string) =>
   `/api/v1/appointments/${id}`;
 
-/** DELETE /api/v1/telephony/phone-numbers/{id} */
-export const phonePath = (id: number | string) =>
-  `/api/v1/telephony/phone-numbers/${id}`;
-
 /** GET /api/v1/telephony/configs/{id}/phone-numbers */
 export const telephonyPhoneNumbersPath = (configId: number | string) =>
   `/api/v1/telephony/configs/${configId}/phone-numbers`;
 
-/** GET/PATCH/DELETE /api/v1/telephony/configs/{id} */
+/** POST /api/v1/telephony/configs/{id}/phone-numbers/{numId} */
+export const telephonyPhoneNumberPath = (configId: number | string, numId: number | string) =>
+  `/api/v1/telephony/configs/${configId}/phone-numbers/${numId}`;
+
+/** POST /api/v1/telephony/configs/{id}/set-default-outbound */
+export const telephonySetDefaultOutboundPath = (configId: number | string) =>
+  `/api/v1/telephony/configs/${configId}/set-default-outbound`;
+
+/** POST /api/v1/telephony/configs/{id}/phone-numbers/{numId}/set-default-caller */
+export const telephonySetDefaultCallerPath = (configId: number | string, numId: number | string) =>
+  `/api/v1/telephony/configs/${configId}/phone-numbers/${numId}/set-default-caller`;
+
+/** GET/PUT/DELETE /api/v1/telephony/configs/{id} */
 export const telephonyConfigPath = (configId: number | string) =>
   `/api/v1/telephony/configs/${configId}`;
 

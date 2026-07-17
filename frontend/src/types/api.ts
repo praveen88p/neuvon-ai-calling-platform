@@ -364,6 +364,7 @@ export interface TelephonyConfigResponse {
   provider: string | null;
   name: string | null;
   is_default_outbound: boolean;
+  phone_number_count: number;
   created_at: string | null;
   updated_at: string | null;
 }
@@ -373,23 +374,45 @@ export interface TelephonyConfigListResponse {
   total: number;
 }
 
+export interface TelephonyProviderField {
+  name: string;
+  label: string | null;
+  type: string; // "text" | "password" | "textarea" | "string-array" | "number"
+  required: boolean;
+  sensitive: boolean;
+  description: string | null;
+}
+
 export interface TelephonyProviderMetadata {
   provider: string;
   display_name: string | null;
-  credential_fields: Record<string, unknown>[];
+  docs_url: string | null;
+  fields: TelephonyProviderField[];
 }
 
 export interface TelephonyProvidersResponse {
   providers: TelephonyProviderMetadata[];
 }
 
+export interface ProviderSync {
+  ok: boolean;
+  message: string | null;
+}
+
 export interface PhoneNumberResponse {
   id: number;
-  phone_number: string | null;
+  telephony_configuration_id: number | null;
+  address: string | null;
+  address_normalized: string | null;
+  address_type: string | null;
+  country_code: string | null;
   label: string | null;
-  is_default_caller: boolean;
+  is_default_caller_id: boolean;
   is_active: boolean;
   inbound_workflow_id: number | null;
+  inbound_workflow_name: string | null;
+  extra_metadata: Record<string, unknown> | null;
+  provider_sync: ProviderSync | null;
   created_at: string | null;
   updated_at: string | null;
 }

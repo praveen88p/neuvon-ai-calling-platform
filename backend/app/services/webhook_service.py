@@ -62,6 +62,8 @@ class WebhookService:
 
         Idempotent: uses dograh_run_id as dedup key.
         """
+        import sentry_sdk
+
         run_id = payload.run_id
         if not run_id:
             logger.warning("webhook.missing_run_id", payload_keys=list(payload.model_dump().keys()))
@@ -69,6 +71,11 @@ class WebhookService:
                 status="skipped",
                 message="No run_id in payload",
             )
+
+        # Tag Sentry context so any errors during processing include call info
+        sentry_sdk.set_tag("dograh.run_id", run_id)
+        sentry_sdk.set_tag("dograh.workflow_id", payload.workflow_id)
+        sentry_sdk.set_tag("dograh.status", payload.status)
 
         existing = await self._find_local_run(run_id)
 
@@ -173,6 +180,12 @@ class WebhookService:
         if payload.status in ("completed", "failed"):
             updates["completed_at"] = now_iso
 
+        # Resolve campaign_id if missing on the existing run
+        if not existing.get("campaign_id"):
+            local_campaign_id = await self._resolve_campaign_id(payload)
+            if local_campaign_id:
+                updates["campaign_id"] = local_campaign_id
+
         try:
             await self.db.database.from_("call_runs") \
                 .eq("id", existing["id"]) \
@@ -210,6 +223,11 @@ class WebhookService:
             "caller_number": payload.caller_number or "",
             "duration_seconds": payload.duration_seconds or 0,
         }
+
+        # Resolve campaign_id from initial_context or payload
+        local_campaign_id = await self._resolve_campaign_id(payload)
+        if local_campaign_id:
+            record["campaign_id"] = local_campaign_id
 
         # Only include nullable fields when present
         if payload.transcript_url:
@@ -272,3 +290,46 @@ class WebhookService:
             return rows[0]["organization_id"] if rows else None
         except Exception:
             return None
+
+    async def _resolve_campaign_id(self, payload: DograhWebhookPayload) -> str | None:
+        """Resolve local campaign UUID from Dograh's integer campaign_id.
+
+        The campaign_id comes from either:
+        - payload.campaign_id (top-level webhook field)
+        - payload.initial_context.campaign_id (set by Dograh for campaign calls)
+        """
+        dograh_campaign_id = payload.campaign_id
+
+        # Fallback: check initial_context
+        if not dograh_campaign_id and payload.initial_context:
+            ic = payload.initial_context
+            raw = ic.get("campaign_id")
+            if raw is not None:
+                try:
+                    dograh_campaign_id = int(raw)
+                except (ValueError, TypeError):
+                    pass
+
+        if not dograh_campaign_id:
+            return None
+
+        try:
+            rows = await self.db.database.from_("campaigns") \
+                .select("id") \
+                .eq("dograh_campaign_id", dograh_campaign_id) \
+                .limit(1) \
+                .execute()
+            rows = rows if isinstance(rows, list) else []
+            if rows:
+                return rows[0]["id"]
+            logger.debug(
+                "webhook.campaign_not_found",
+                dograh_campaign_id=dograh_campaign_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "webhook.campaign_resolve_failed",
+                dograh_campaign_id=dograh_campaign_id,
+                error=str(exc),
+            )
+        return None

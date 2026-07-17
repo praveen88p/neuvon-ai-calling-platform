@@ -333,13 +333,46 @@ class AppointmentService:
             return
 
         try:
-            await db.database.from_("appointments").insert([record])
-            logger.info(
-                "appointments.auto_extracted",
-                org_id=org_id,
-                call_run_id=record.get("call_run_id"),
-                dograh_run_id=call_run_id,
-            )
+            # Check if an appointment already exists (e.g. created by book_appointment tool)
+            # Match on org_id + contact_phone + appointment_date
+            contact_phone = record.get("contact_phone", "")
+            appt_date_val = record.get("appointment_date")
+
+            existing = []
+            if contact_phone and appt_date_val:
+                existing = await db.database.from_("appointments") \
+                    .select("id, call_run_id") \
+                    .eq("organization_id", org_id) \
+                    .eq("contact_phone", contact_phone) \
+                    .eq("appointment_date", appt_date_val) \
+                    .limit(1) \
+                    .execute()
+                existing = existing if isinstance(existing, list) else []
+
+            if existing:
+                # Update the tool-booked appointment with the call_run_id
+                # so it links to the campaign
+                update_data = {"call_run_id": record["call_run_id"]}
+                # Also update contact_name if it was empty
+                if not existing[0].get("contact_name"):
+                    update_data["contact_name"] = record.get("contact_name", "")
+                await db.database.from_("appointments") \
+                    .eq("id", existing[0]["id"]) \
+                    .update(update_data)
+                logger.info(
+                    "appointments.linked_to_call_run",
+                    appointment_id=existing[0]["id"],
+                    call_run_id=record.get("call_run_id"),
+                    dograh_run_id=call_run_id,
+                )
+            else:
+                await db.database.from_("appointments").insert([record])
+                logger.info(
+                    "appointments.auto_extracted",
+                    org_id=org_id,
+                    call_run_id=record.get("call_run_id"),
+                    dograh_run_id=call_run_id,
+                )
         except Exception as exc:
             logger.warning(
                 "appointments.auto_extract_failed",

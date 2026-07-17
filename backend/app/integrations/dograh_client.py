@@ -233,8 +233,31 @@ class DograhClient:
         return await self._request("GET", "/organizations/telephony-configs")
 
     async def create_telephony_config(self, data: dict) -> dict:
-        """POST /organizations/telephony-configs — create a config."""
-        return await self._request("POST", "/organizations/telephony-configs", json=data)
+        """POST /organizations/telephony-configs — create a config.
+
+        Dograh expects:
+        {
+            "name": "My Vobiz Account",
+            "is_default_outbound": false,
+            "config": {
+                "provider": "vobiz",
+                "auth_id": "...",
+                "auth_token": "...",
+                "application_id": null    # optional — auto-created if empty
+            }
+        }
+        """
+        provider = data.get("provider", "")
+        credentials = data.get("credentials", {})
+        payload = {
+            "name": data.get("name", ""),
+            "is_default_outbound": data.get("is_default_outbound", False),
+            "config": {
+                "provider": provider,
+                **credentials,
+            },
+        }
+        return await self._request("POST", "/organizations/telephony-configs", json=payload)
 
     async def get_telephony_config(self, config_id: int) -> dict:
         """GET /organizations/telephony-configs/{config_id}."""

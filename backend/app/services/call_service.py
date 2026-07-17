@@ -182,72 +182,54 @@ class CallService:
         start_date: str | None = None,
         end_date: str | None = None,
         agent_id: int | None = None,
-        campaign_id: int | None = None,
+        campaign_id: str | None = None,
         caller_number: str | None = None,
         called_number: str | None = None,
         disposition: list[str] | None = None,
         min_duration: int | None = None,
         max_duration: int | None = None,
     ) -> CallHistoryResponse:
-        """Paginated call history with filters from Dograh."""
+        """Paginated call history from local DB, scoped to organization.
+
+        Reads from the local call_runs table (not Dograh) to enforce
+        multi-tenant isolation. Data enters call_runs via:
+        1. Direct triggers (CallService.trigger_call)
+        2. Dograh webhooks (WebhookService.process_dograh_webhook)
+        3. Campaign sync backfill (CampaignService.get_campaign_runs)
+        """
         org_id = current_user.organization_id
 
-        # Build Dograh query params
-        params: dict = {"page": page, "limit": min(limit, 100)}
-
-        if start_date:
-            params["start_date"] = start_date
-        if end_date:
-            params["end_date"] = end_date
-
-        # Build Dograh-compatible filter objects
-        filters: list[dict] = []
-
-        if agent_id is not None:
-            filters.append({
-                "attribute": "workflowId",
-                "type": "number",
-                "value": {"value": agent_id},
-            })
-        if campaign_id is not None:
-            filters.append({
-                "attribute": "campaignId",
-                "type": "number",
-                "value": {"value": campaign_id},
-            })
-        if caller_number:
-            filters.append({
-                "attribute": "callerNumber",
-                "type": "text",
-                "value": {"value": caller_number},
-            })
-        if called_number:
-            filters.append({
-                "attribute": "calledNumber",
-                "type": "text",
-                "value": {"value": called_number},
-            })
-        if disposition:
-            filters.append({
-                "attribute": "dispositionCode",
-                "type": "multiSelect",
-                "value": {"codes": disposition},
-            })
-        if min_duration is not None or max_duration is not None:
-            filters.append({
-                "attribute": "duration",
-                "type": "numberRange",
-                "value": {
-                    "min": min_duration or 0,
-                    "max": max_duration or 99999,
-                },
-            })
-
-        if filters:
-            params["filters"] = json.dumps(filters)
-
         try:
-            result = await self.dograh.list_runs(params=params)
+            # Build org-scoped query
+            query = self.db.database.from_("call_runs") \
+                .select("*") \
+                .eq("organization_id", str(org_id)) \
+                .order("created_at", desc=True)
+
+            # Apply filters
+            if start_date:
+                query = query.gte("created_at", start_date)
+            if end_date:
+                end_dt = end_date[:10] + "T23:59:59Z" if len(end_date) <= 10 else end_date
+                query = query.lte("created_at", end_dt)
+            if agent_id is not None:
+                query = query.eq("dograh_workflow_id", agent_id)
+            if campaign_id is not None:
+                query = query.eq("campaign_id", str(campaign_id))
+            if caller_number:
+                query = query.eq("caller_number", caller_number)
+            if called_number:
+                query = query.eq("phone_number", called_number)
+            if disposition:
+                query = query.in_("disposition", disposition)
+            if min_duration is not None:
+                query = query.gte("duration_seconds", min_duration)
+            if max_duration is not None:
+                query = query.lte("duration_seconds", max_duration)
+
+            rows = await query.execute()
+            rows = rows if isinstance(rows, list) else []
+
         except Exception as exc:
             logger.error("call.history_failed", org_id=org_id, error=str(exc))
             raise HTTPException(
@@ -255,35 +237,51 @@ class CallService:
                 detail="Failed to fetch call history",
             ) from exc
 
-        # Normalize result — Dograh may return list or dict with runs key
-        if isinstance(result, list):
-            raw_runs = result
-            total = len(raw_runs)
-        else:
-            raw_runs = result.get("runs", result.get("data", []))
-            total = result.get("total", result.get("count", len(raw_runs)))
+        # Pagination in Python (InsForge client doesn't support .range())
+        total = len(rows)
+        offset = (page - 1) * limit
+        paginated_rows = rows[offset:offset + limit]
+
+        # Batch-resolve workflow names and campaign names
+        workflow_ids = list({r.get("dograh_workflow_id") for r in paginated_rows if r.get("dograh_workflow_id")})
+        campaign_ids = list({str(r.get("campaign_id")) for r in paginated_rows if r.get("campaign_id")})
+        agent_names = await self._resolve_agent_names(str(org_id), workflow_ids)
+        campaign_names = await self._resolve_campaign_names(str(org_id), campaign_ids)
+
+        # Extract cost from cost_info JSON
+        def _extract_cost(r: dict) -> float | None:
+            ci = r.get("cost_info")
+            if isinstance(ci, dict):
+                return ci.get("total_cost")
+            if isinstance(ci, str):
+                try:
+                    parsed = json.loads(ci)
+                    return parsed.get("total_cost") if isinstance(parsed, dict) else None
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            return None
 
         runs = [
             CallHistoryItem(
-                run_id=r.get("id", 0),
-                workflow_id=r.get("workflow_id"),
-                workflow_name=r.get("workflow_name"),
+                run_id=r.get("dograh_run_id", 0),
+                workflow_id=r.get("dograh_workflow_id"),
+                workflow_name=agent_names.get(r.get("dograh_workflow_id", 0)),
                 campaign_id=r.get("campaign_id"),
-                campaign_name=r.get("campaign_name"),
+                campaign_name=campaign_names.get(str(r.get("campaign_id", ""))),
                 call_type=r.get("call_type"),
                 status=r.get("status"),
-                disposition_code=r.get("disposition_code"),
-                phone_number=r.get("phone_number", r.get("called_number")),
+                disposition_code=r.get("disposition"),
+                phone_number=r.get("phone_number"),
                 caller_number=r.get("caller_number"),
-                duration_seconds=r.get("call_duration_seconds", r.get("duration")),
-                cost=r.get("cost"),
+                duration_seconds=r.get("duration_seconds"),
+                cost=_extract_cost(r),
                 recording_url=r.get("recording_url"),
                 transcript_url=r.get("transcript_url"),
                 public_access_token=r.get("public_access_token"),
                 created_at=r.get("created_at"),
                 completed_at=r.get("completed_at"),
             )
-            for r in raw_runs
+            for r in paginated_rows
         ]
 
         return CallHistoryResponse(
@@ -293,6 +291,46 @@ class CallService:
             limit=limit,
             has_more=(page * limit) < total,
         )
+
+
+    async def _resolve_agent_names(
+        self, org_id: str, workflow_ids: list[int],
+    ) -> dict[int, str]:
+        """Batch-resolve workflow_id → agent display name from local mappings."""
+        if not workflow_ids:
+            return {}
+        try:
+            rows = await self.db.database.from_("dograh_agent_mappings") \
+                .select("dograh_workflow_id, agent_name") \
+                .eq("organization_id", org_id) \
+                .in_("dograh_workflow_id", workflow_ids) \
+                .execute()
+            rows = rows if isinstance(rows, list) else []
+            return {
+                r["dograh_workflow_id"]: r.get("agent_name", f"Agent {r['dograh_workflow_id']}")
+                for r in rows
+            }
+        except Exception as exc:
+            logger.warning("call.agent_names_failed", error=str(exc))
+            return {}
+
+    async def _resolve_campaign_names(
+        self, org_id: str, campaign_ids: list[str],
+    ) -> dict[str, str]:
+        """Batch-resolve campaign_id → campaign name from local campaigns table."""
+        if not campaign_ids:
+            return {}
+        try:
+            rows = await self.db.database.from_("campaigns") \
+                .select("id, name") \
+                .eq("organization_id", org_id) \
+                .in_("id", campaign_ids) \
+                .execute()
+            rows = rows if isinstance(rows, list) else []
+            return {str(r["id"]): r.get("name", "") for r in rows}
+        except Exception as exc:
+            logger.warning("call.campaign_names_failed", error=str(exc))
+            return {}
 
     async def get_recording_url(
         self, run_id: int, current_user: UserContext,

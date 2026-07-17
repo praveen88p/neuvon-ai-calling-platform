@@ -31,3 +31,6 @@ razorpay>=1.4.2
 
 # Logging
 structlog>=24.4.0
+
+# Error Tracking
+sentry-sdk[fastapi]>=2.0.0

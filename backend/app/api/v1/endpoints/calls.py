@@ -40,7 +40,7 @@ async def get_call_history(
     start_date: str | None = Query(None, description="Start date ISO 8601"),
     end_date: str | None = Query(None, description="End date ISO 8601"),
     agent_id: int | None = Query(None, description="Filter by workflow/agent ID"),
-    campaign_id: int | None = Query(None, description="Filter by campaign ID"),
+    campaign_id: str | None = Query(None, description="Filter by campaign ID"),
     caller_number: str | None = Query(None, description="Filter by caller number"),
     called_number: str | None = Query(None, description="Filter by called number"),
     disposition: list[str] | None = Query(None, description="Filter by disposition codes"),
