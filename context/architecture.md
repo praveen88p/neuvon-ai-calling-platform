@@ -192,16 +192,16 @@ Public URLs:
 ### Organization Hierarchy
 
 ```
-Platform (Neuvon)
+Platform (Neuvon — you manage everything)
 ├── Organization A (direct client)
 │   └── Users (owner, admin, member)
-├── Organization B (reseller)
+├── Organization B (direct client)
 │   └── Users (owner, admin, member)
 └── Organization C (direct client)
     └── Users (owner, admin, member)
 ```
 
-Flat structure — every tenant is a top-level organization. There are no sub-organizations. Resellers and direct clients are differentiated by `org_type` but share the same hierarchy level.
+Flat structure — every tenant is a top-level organization. There are no sub-organizations. All clients are `direct` type. White-labeling and reseller features are deferred.
 
 ### RBAC Roles
 
@@ -351,11 +351,14 @@ The frontend handles auth via InsForge's client SDK. The backend validates InsFo
 | id | uuid | PK |
 | name | text | Display name |
 | slug | text | URL-friendly identifier, unique |
-| org_type | text | `direct` / `reseller` |
-| white_label | jsonb | `{ display_name, logo_url, primary_color, favicon_url }` |
-| dograh_api_key | text | Encrypted — org-specific Dograh API key |
-| billing_plan | text | `free` / `starter` / `growth` / `enterprise` |
+| org_type | text | `direct` (all clients currently) |
+| white_label | jsonb | Deferred — not exposed in client settings |
+| dograh_api_key | text | Falls back to global if null |
+| billing_plan | text | Legacy — kept for DB compat, not used in billing logic |
+| rate_per_minute | numeric(8,2) | Custom per-org rate in ₹ (default 3.50). Set by Neuvon admin. |
 | usage_quota | jsonb | `{ monthly_minutes: 1000, max_agents: 5, max_campaigns: 10 }` |
+| webhook_url | text | Deferred — forwarding not yet built |
+| timezone | text | Default `Asia/Kolkata` |
 | is_active | boolean | Soft disable toggle |
 | created_at | timestamptz | |
 | updated_at | timestamptz | |
@@ -634,4 +637,6 @@ Rules that must never be violated:
 9. **All secrets come from environment variables.** No hardcoded API keys, URLs, or credentials anywhere in code.
 10. **Celery tasks handle all background work.** Usage aggregation, billing calculations, and webhook-triggered sync always run as Celery tasks — never blocking the request cycle.
 11. **Audit everything.** All state-changing operations (call trigger, campaign start, member invite, role change) create an `audit_log` entry.
-12. **Flat org hierarchy.** Every tenant is a top-level organization. No sub-organizations or nesting — resellers and direct clients are differentiated by `org_type` only.
+12. **Flat org hierarchy.** Every tenant is a top-level organization. No sub-organizations or nesting.
+13. **Client settings are read-only.** Org settings, billing rates, and API keys are managed from the super admin panel — not by clients. Client Settings page only allows profile edits and team management.
+14. **Billing uses per-org custom rates.** No hardcoded plan tiers. Each org has a `rate_per_minute` set by Neuvon admin. Cost = minutes × rate.

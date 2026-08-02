@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.core.dependencies import get_current_user
 from app.schemas.auth import UserContext
@@ -14,6 +14,7 @@ from app.schemas.call import (
     DownloadUrlResponse,
 )
 from app.services.call_service import CallService
+from app.services.topup_service import TopUpService
 
 router = APIRouter(prefix="/calls", tags=["calls"])
 
@@ -27,7 +28,21 @@ async def trigger_call(
     data: CallTrigger,
     current_user: Annotated[UserContext, Depends(get_current_user)],
 ) -> CallTriggerResponse:
-    """Trigger an outbound call via Dograh agent."""
+    """Trigger an outbound call via Dograh agent.
+
+    Pre-paid model: blocks if org has no remaining minutes.
+    """
+    # Check minute balance before allowing the call
+    topup_service = TopUpService()
+    _, balance = await topup_service._get_org_rate_and_balance(
+        current_user.organization_id
+    )
+    if balance <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail="Insufficient minutes. Please purchase a minute pack to continue making calls.",
+        )
+
     service = CallService()
     return await service.trigger_call(data, current_user)
 

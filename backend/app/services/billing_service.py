@@ -18,37 +18,11 @@ from app.schemas.billing import (
     InvoiceListResponse,
     OrderResponse,
     PaymentVerificationResponse,
-    PlanDetails,
     UsageSummary,
     VerifyPaymentRequest,
 )
 
 
-# --- Plan definitions ---
-
-PLANS: dict[str, dict] = {
-    "free": {
-        "plan_name": "Free Tier",
-        "price_monthly_inr": 0,
-        "calls_limit": 100,
-        "minutes_limit": 500.0,
-        "features": ["100 calls/mo", "500 minutes/mo", "Basic analytics"],
-    },
-    "starter": {
-        "plan_name": "Starter",
-        "price_monthly_inr": 99900,  # ₹999 in paisa
-        "calls_limit": 1000,
-        "minutes_limit": 5000.0,
-        "features": ["1,000 calls/mo", "5,000 minutes/mo", "Advanced analytics", "Priority support"],
-    },
-    "pro": {
-        "plan_name": "Pro",
-        "price_monthly_inr": 499900,  # ₹4,999 in paisa
-        "calls_limit": 10000,
-        "minutes_limit": 50000.0,
-        "features": ["10,000 calls/mo", "50,000 minutes/mo", "Full analytics", "Dedicated support", "Custom agents"],
-    },
-}
 
 
 class BillingService:
@@ -63,7 +37,11 @@ class BillingService:
         self.razorpay = RazorpayService()
 
     async def get_usage_summary(self, current_user: UserContext) -> UsageSummary:
-        """Return current billing period usage vs plan limits."""
+        """Return current billing period usage with per-org custom rate.
+
+        Rate is stored in organizations.rate_per_minute (set by Neuvon admin).
+        Cost = total_minutes × rate_per_minute.
+        """
         org_id = current_user.organization_id
         today = date.today()
         period_start = today.replace(day=1)
@@ -72,50 +50,33 @@ class BillingService:
         else:
             period_end = today.replace(month=today.month + 1, day=1) - timedelta(days=1)
 
-        plan_id = await self._get_org_plan(org_id)
-        plan = PLANS.get(plan_id, PLANS["free"])
+        # Get per-org rate, fees, and quota
+        rate, platform_fee, plan_label, minutes_limit = await self._get_org_billing_info(org_id)
 
         # Aggregate from call_runs for current period
         total_calls, total_seconds = await self._aggregate_usage(
             org_id, period_start.isoformat(), period_end.isoformat()
         )
         total_minutes = round(total_seconds / 60, 2)
+        usage_cost = round(total_minutes * rate, 2)
+        total_cost = round(usage_cost + platform_fee, 2)
 
-        # Cost is based on call_runs cost_info
-        total_cost = await self._aggregate_cost(
-            org_id, period_start.isoformat(), period_end.isoformat()
-        )
-
-        calls_remaining = max(0, plan["calls_limit"] - total_calls)
-        minutes_remaining = max(0.0, plan["minutes_limit"] - total_minutes)
+        minutes_remaining: float | None = None
+        if minutes_limit and minutes_limit > 0:
+            minutes_remaining = max(0.0, minutes_limit - total_minutes)
 
         return UsageSummary(
             organization_id=org_id,
             period_start=period_start.isoformat(),
             period_end=period_end.isoformat(),
+            rate_per_minute=rate,
+            platform_fee=platform_fee,
+            plan_label=plan_label,
             total_calls=total_calls,
             total_minutes=total_minutes,
-            total_cost_usd=total_cost,
-            plan_name=plan["plan_name"],
-            calls_limit=plan["calls_limit"],
-            minutes_limit=plan["minutes_limit"],
-            calls_remaining=calls_remaining,
+            total_cost=total_cost,
+            minutes_limit=minutes_limit,
             minutes_remaining=minutes_remaining,
-        )
-
-    async def get_plan_details(self, current_user: UserContext) -> PlanDetails:
-        """Return the organization's current plan details."""
-        org_id = current_user.organization_id
-        plan_id = await self._get_org_plan(org_id)
-        plan = PLANS.get(plan_id, PLANS["free"])
-
-        return PlanDetails(
-            plan_id=plan_id,
-            plan_name=plan["plan_name"],
-            price_monthly_inr=plan["price_monthly_inr"],
-            calls_limit=plan["calls_limit"],
-            minutes_limit=plan["minutes_limit"],
-            features=plan["features"],
         )
 
     async def create_order(
@@ -263,7 +224,7 @@ class BillingService:
                 period_end=str(r.get("period_end", "")),
                 total_minutes=float(r.get("total_minutes", 0)),
                 total_calls=int(r.get("total_calls", 0)),
-                total_cost_usd=float(r.get("total_cost_usd", 0)),
+                total_cost=float(r.get("total_cost_usd", 0)),
                 razorpay_invoice_id=r.get("razorpay_invoice_id"),
                 status=r.get("status", "pending"),
                 created_at=str(r.get("created_at", "")),
@@ -294,7 +255,9 @@ class BillingService:
         if event_type == "payment.captured":
             payment = payload.get("payload", {}).get("payment", {}).get("entity", {})
             order_id = payment.get("order_id")
+            payment_id = payment.get("id")
             if order_id:
+                # Update billing record status
                 try:
                     await self.db.database.from_("billing_records") \
                         .eq("razorpay_invoice_id", order_id) \
@@ -305,24 +268,48 @@ class BillingService:
                 except Exception as exc:
                     logger.error("razorpay.webhook_update_failed", error=str(exc))
 
+                # Credit minutes if this is a top-up order
+                if payment_id:
+                    try:
+                        from app.services.topup_service import TopUpService
+                        topup_service = TopUpService()
+                        await topup_service.credit_minutes_on_payment(
+                            razorpay_order_id=order_id,
+                            razorpay_payment_id=payment_id,
+                        )
+                    except Exception as exc:
+                        logger.error("razorpay.topup_credit_failed", error=str(exc))
+
         return {"status": "ok", "event": event_type}
 
     # --- Internal helpers ---
 
-    async def _get_org_plan(self, org_id: str) -> str:
-        """Get the plan_id for an organization (defaults to 'free')."""
+    async def _get_org_billing_info(self, org_id: str) -> tuple[float, float, str | None, float | None]:
+        """Get per-org rate_per_minute, platform_fee, plan_label and monthly minutes limit.
+
+        Returns (rate_per_minute, platform_fee, plan_label, minutes_limit).
+        """
         try:
             rows = await self.db.database.from_("organizations") \
-                .select("plan") \
+                .select("rate_per_minute, platform_fee, plan_label, usage_quota") \
                 .eq("id", org_id) \
                 .limit(1) \
                 .execute()
             rows = rows if isinstance(rows, list) else []
-            if rows and rows[0].get("plan"):
-                return rows[0]["plan"]
-        except Exception:
-            pass
-        return "free"
+            if rows:
+                rate = float(rows[0].get("rate_per_minute", 3.50) or 3.50)
+                platform_fee = float(rows[0].get("platform_fee", 0.0) or 0.0)
+                plan_label = rows[0].get("plan_label")
+                quota = rows[0].get("usage_quota")
+                if isinstance(quota, str):
+                    quota = json.loads(quota)
+                if isinstance(quota, dict):
+                    limit = quota.get("monthly_minutes")
+                    return rate, platform_fee, plan_label, float(limit) if limit else None
+                return rate, platform_fee, plan_label, None
+        except Exception as exc:
+            logger.warning("billing.org_info_failed", org_id=org_id, error=str(exc))
+        return 3.50, 0.0, None, None
 
     async def _aggregate_usage(
         self, org_id: str, start_date: str, end_date: str

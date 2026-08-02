@@ -3,7 +3,7 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 
-# --- Request schemas ---
+# --- Request schemas (kept for future super-admin Razorpay integration) ---
 
 class CreateOrderRequest(BaseModel):
     """Input for creating a Razorpay payment order."""
@@ -24,30 +24,23 @@ class VerifyPaymentRequest(BaseModel):
 # --- Response schemas ---
 
 class UsageSummary(BaseModel):
-    """Current billing period usage summary."""
+    """Current billing period usage summary.
+
+    Uses per-org custom rate_per_minute (set by Neuvon admin)
+    instead of hardcoded plan tiers.
+    """
 
     organization_id: str
     period_start: str
     period_end: str
+    rate_per_minute: float = 3.50
+    platform_fee: float = 0.0
+    plan_label: str | None = None
     total_calls: int = 0
     total_minutes: float = 0.0
-    total_cost_usd: float = 0.0
-    plan_name: str = "free"
-    calls_limit: int = 100
-    minutes_limit: float = 500.0
-    calls_remaining: int = 100
-    minutes_remaining: float = 500.0
-
-
-class PlanDetails(BaseModel):
-    """Current billing plan info."""
-
-    plan_id: str = "free"
-    plan_name: str = "Free Tier"
-    price_monthly_inr: int = 0
-    calls_limit: int = 100
-    minutes_limit: float = 500.0
-    features: list[str] = Field(default_factory=list)
+    total_cost: float = 0.0
+    minutes_limit: float | None = None   # None = unlimited
+    minutes_remaining: float | None = None
 
 
 class OrderResponse(BaseModel):
@@ -79,7 +72,7 @@ class InvoiceItem(BaseModel):
     period_end: str
     total_minutes: float
     total_calls: int
-    total_cost_usd: float
+    total_cost: float
     razorpay_invoice_id: str | None = None
     status: str
     created_at: str

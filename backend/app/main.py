@@ -3,6 +3,8 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 
 import sentry_sdk
+from sentry_sdk.integrations.fastapi import FastApiIntegration
+from sentry_sdk.integrations.starlette import StarletteIntegration
 from fastapi import FastAPI
 
 from app.api.v1.router import api_router
@@ -17,6 +19,13 @@ if _settings.SENTRY_DSN:
     sentry_sdk.init(
         dsn=_settings.SENTRY_DSN,
         environment=_settings.ENVIRONMENT,
+        # Only load the integrations we actually use — avoids Celery/Kombu
+        # entry_points scan that causes TimeoutError on Python 3.14.
+        integrations=[
+            FastApiIntegration(),
+            StarletteIntegration(),
+        ],
+        auto_enabling_integrations=False,
         # Capture 20% of transactions for performance monitoring
         traces_sample_rate=0.2,
         # Capture all errors (100%)

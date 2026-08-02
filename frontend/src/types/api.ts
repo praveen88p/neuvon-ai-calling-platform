@@ -447,32 +447,6 @@ export interface ProfileResponse {
   created_at: string | null;
 }
 
-export interface ApiKeyResponse {
-  id: string;
-  organization_id: string;
-  name: string;
-  key_prefix: string;
-  is_active: boolean;
-  expires_at: string | null;
-  created_at: string | null;
-  last_used_at: string | null;
-}
-
-export interface ApiKeyCreatedResponse {
-  id: string;
-  organization_id: string;
-  name: string;
-  key: string;
-  key_prefix: string;
-  expires_at: string | null;
-  created_at: string | null;
-}
-
-export interface ApiKeyListResponse {
-  keys: ApiKeyResponse[];
-  total: number;
-}
-
 // ─── Admin ───────────────────────────────────────────────────────────────────
 
 export interface AdminOrgItem {
@@ -535,21 +509,63 @@ export interface SystemLogListResponse {
 // ─── Billing (Settings Tab) ──────────────────────────────────────────────────
 
 export interface BillingUsageResponse {
+  organization_id: string;
+  period_start: string;
+  period_end: string;
+  rate_per_minute: number;
+  platform_fee: number;
+  plan_label: string | null;
   total_calls: number;
   total_minutes: number;
   total_cost: number;
-  remaining_minutes: number | null;
-  period_start: string | null;
-  period_end: string | null;
+  minutes_limit: number | null;
+  minutes_remaining: number | null;
 }
 
-export interface PlanInfoResponse {
-  plan_name: string;
-  plan_id: string | null;
-  price_per_month: number | null;
-  monthly_minutes_limit: number | null;
-  monthly_calls_limit: number | null;
-  features: string[];
+// ─── Top-Up (Minute Packs) ──────────────────────────────────────────────────
+
+export interface MinutePackOption {
+  minutes: number;
+  price: number;
+  label: string;
+}
+
+export interface AvailablePacksResponse {
+  rate_per_minute: number;
+  packs: MinutePackOption[];
+  minute_balance: number;
+}
+
+export interface TopUpOrderResponse {
+  order_id: string;
+  amount: number;
+  currency: string;
+  razorpay_key_id: string;
+  minutes: number;
+  rate_per_minute: number;
+  description: string;
+}
+
+export interface MinuteBalanceResponse {
+  organization_id: string;
+  minute_balance: number;
+  total_purchased: number;
+  total_used: number;
+  active_packs: number;
+}
+
+export interface MinutePackDetail {
+  id: string;
+  minutes_purchased: number;
+  minutes_remaining: number;
+  amount_paid: number;
+  status: string;
+  created_at: string | null;
+}
+
+export interface MinutePackListResponse {
+  packs: MinutePackDetail[];
+  total: number;
 }
 
 // ─── Team (Settings Tab) ────────────────────────────────────────────────────

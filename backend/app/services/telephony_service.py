@@ -181,6 +181,9 @@ class TelephonyService:
         """Create a telephony configuration.
 
         Dual-storage: create in Dograh, then save to local DB with org_id.
+        If Dograh returns 409 (name conflict), recover the existing config
+        and sync it to local DB — handles cases where Dograh has the config
+        but our local DB doesn't.
         """
         org_id = current_user.organization_id
 
@@ -188,6 +191,12 @@ class TelephonyService:
         try:
             result = await self.dograh.create_telephony_config(data.model_dump())
         except Exception as exc:
+            # Check if this is a 409 name conflict
+            import httpx
+            if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 409:
+                logger.info("telephony.name_conflict_recovery", name=data.name, org_id=org_id)
+                return await self._recover_existing_config(data.name, org_id)
+
             logger.error("telephony.create_failed", org_id=org_id, error=str(exc))
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
@@ -223,6 +232,105 @@ class TelephonyService:
             dograh_config_id=dograh_config_id,
         )
         return self._map_config(result)
+
+    async def _recover_existing_config(
+        self, name: str, org_id: str,
+    ) -> TelephonyConfigResponse:
+        """Recover a config that exists in Dograh but is missing from local DB.
+
+        SECURITY: Only recovers if the Dograh config was previously created
+        by THIS org (checked via local DB). If another org owns the name,
+        returns a 409 error — never syncs another org's config.
+
+        Flow:
+        1. Fetch all configs from Dograh
+        2. Find the one matching `name`
+        3. Check local DB — does ANY org already own this dograh_config_id?
+           - If this org owns it → already synced, just return it
+           - If another org owns it → name conflict, return 409
+           - If nobody owns it → this org created it before but local insert
+             failed, so sync it now
+        """
+        try:
+            all_configs = await self.dograh.list_telephony_configs()
+        except Exception as exc:
+            logger.error("telephony.recovery_list_failed", error=str(exc))
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"A configuration named '{name}' already exists. Please use a different name.",
+            ) from exc
+
+        # Dograh returns { configs: [...] } or a list
+        configs_list = all_configs if isinstance(all_configs, list) else all_configs.get("configs", [])
+
+        # Find the matching config by name
+        match = None
+        for cfg in configs_list:
+            cfg_name = cfg.get("name", cfg.get("label", ""))
+            if cfg_name.lower() == name.lower():
+                match = cfg
+                break
+
+        if not match:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"A configuration named '{name}' already exists. Please use a different name.",
+            )
+
+        dograh_config_id = match.get("id")
+
+        # Check who owns this config in local DB (ANY org)
+        try:
+            existing = await self.db.database.from_("telephony_configs") \
+                .select("organization_id") \
+                .eq("dograh_config_id", dograh_config_id) \
+                .limit(1) \
+                .execute()
+            existing = existing if isinstance(existing, list) else []
+        except Exception:
+            existing = []
+
+        if existing:
+            owner_org = existing[0].get("organization_id")
+            if owner_org == str(org_id):
+                # This org owns it — already synced, just return it
+                logger.info("telephony.config_already_synced", name=name, org_id=org_id)
+                return self._map_config(match)
+            else:
+                # ANOTHER org owns this name — real conflict, do NOT sync
+                logger.warning(
+                    "telephony.cross_org_name_conflict",
+                    name=name,
+                    requesting_org=org_id,
+                    owning_org=owner_org,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"A configuration named '{name}' already exists. Please use a different name.",
+                )
+
+        # Nobody owns it in local DB — this org created it before but local
+        # insert failed. Safe to sync.
+        local_record = {
+            "organization_id": str(org_id),
+            "dograh_config_id": dograh_config_id,
+            "provider": match.get("provider", "unknown"),
+            "label": match.get("name", match.get("label", name)),
+            "is_default_outbound": match.get("is_default_outbound", False),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            await self.db.database.from_("telephony_configs").insert([local_record])
+            logger.info(
+                "telephony.config_recovered",
+                org_id=org_id,
+                dograh_config_id=dograh_config_id,
+                name=name,
+            )
+        except Exception as exc:
+            logger.warning("telephony.recovery_insert_failed", error=str(exc))
+
+        return self._map_config(match)
 
     async def get_config(
         self, config_id: int, current_user: UserContext,

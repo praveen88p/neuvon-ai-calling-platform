@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.api.v1.endpoints import admin, agents, analytics, appointments, auth, availability, billing, calls, campaigns, health, live_calls, organizations, settings, telephony, webhooks
+from app.api.v1.endpoints import admin, agents, analytics, appointments, auth, availability, billing, calls, campaigns, health, live_calls, organizations, settings, telephony, topup, webhooks
 
 api_router = APIRouter(prefix="/api/v1")
 
@@ -14,6 +14,7 @@ api_router.include_router(calls.router)
 api_router.include_router(campaigns.router)
 api_router.include_router(analytics.router)
 api_router.include_router(billing.router)
+api_router.include_router(topup.router)
 api_router.include_router(appointments.router)
 api_router.include_router(availability.router)
 api_router.include_router(settings.router)

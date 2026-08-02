@@ -97,6 +97,22 @@ class WebhookService:
                 },
             )
 
+            # Deduct minutes from org's pre-paid balance
+            duration_seconds = payload.duration_seconds or 0
+            if duration_seconds > 0 and org_id:
+                duration_minutes = round(duration_seconds / 60, 2)
+                try:
+                    from app.services.topup_service import TopUpService
+                    topup_service = TopUpService()
+                    await topup_service.deduct_minutes(org_id, duration_minutes)
+                except Exception as exc:
+                    logger.warning(
+                        "webhook.minute_deduction_failed",
+                        org_id=org_id,
+                        minutes=duration_minutes,
+                        error=str(exc),
+                    )
+
         # Auto-extract appointment from gathered_context if present
         if payload.status == "completed" and payload.gathered_context and org_id:
             logger.info(

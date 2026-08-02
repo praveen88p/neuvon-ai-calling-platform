@@ -404,21 +404,24 @@ Track appointments extracted from AI call gathered_context.
 
 ## Phase 6 — Settings & Admin
 
-### 15 Settings & API Keys
+### 15 Settings (Client-Facing)
 
-Organization settings management + API key provisioning.
+Client settings — profile editing + read-only org info. API keys, white-labeling, and org editing are deferred to the super admin panel.
 
-**Endpoints:**
+**Endpoints (active):**
 
-- `GET /api/v1/settings/organization` — Get org settings
-- `PATCH /api/v1/settings/organization` — Update org settings
+- `GET /api/v1/settings/organization` — Get org settings (read-only)
 - `GET /api/v1/settings/profile` — Get user profile
 - `PATCH /api/v1/settings/profile` — Update user profile
-- `POST /api/v1/settings/api-keys` — Create org API key
-- `GET /api/v1/settings/api-keys` — List org API keys
-- `DELETE /api/v1/settings/api-keys/{id}` — Revoke API key
 
-**Verification:** Can update org settings, generate API key, use key to authenticate.
+**Deferred to Super Admin Panel:**
+
+- ~~`PATCH /api/v1/settings/organization`~~ — Org settings managed by Neuvon admin
+- ~~`POST/GET/DELETE /api/v1/settings/api-keys`~~ — API keys not exposed to clients
+
+**Billing is per-org custom rate:** Each org has `rate_per_minute` (default ₹3.50) set by Neuvon admin. Client sees usage × rate.
+
+**Verification:** Can edit profile, org tab is read-only, billing shows custom rate × usage.
 
 ---
 

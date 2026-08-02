@@ -38,10 +38,12 @@ export const API_PATHS = {
 
   // ── Billing ──
   BILLING_USAGE: "/api/v1/billing/usage",
-  BILLING_PLAN: "/api/v1/billing/plan",
-  BILLING_ORDERS: "/api/v1/billing/orders",
-  BILLING_VERIFY: "/api/v1/billing/verify",
   BILLING_INVOICES: "/api/v1/billing/invoices",
+  BILLING_TOPUP_PACKS: "/api/v1/billing/topup/packs",
+  BILLING_TOPUP_ORDER: "/api/v1/billing/topup/order",
+  BILLING_TOPUP_VERIFY: "/api/v1/billing/topup/verify",
+  BILLING_TOPUP_BALANCE: "/api/v1/billing/topup/balance",
+  BILLING_TOPUP_HISTORY: "/api/v1/billing/topup/history",
 
   // ── Appointments ──
   APPOINTMENTS: "/api/v1/appointments",
@@ -58,8 +60,7 @@ export const API_PATHS = {
   // ── Settings ──
   PROFILE: "/api/v1/settings/profile",
   ORG_SETTINGS: "/api/v1/settings/organization",
-  API_KEYS: "/api/v1/settings/api-keys",
-  TEAM: "/api/v1/settings/team",
+  TEAM: "/api/v1/organizations/me/members",
 
   // ── Admin ──
   ADMIN_ORGS: "/api/v1/admin/organizations",
@@ -157,10 +158,6 @@ export const telephonyConfigPath = (configId: number | string) =>
 export const memberPath = (userId: string) =>
   `/api/v1/organizations/me/members/${userId}`;
 
-/** DELETE /api/v1/settings/team/{member_id} */
+/** DELETE /api/v1/organizations/me/members/{member_id} */
 export const teamMemberPath = (memberId: string) =>
-  `/api/v1/settings/team/${memberId}`;
-
-/** DELETE /api/v1/settings/api-keys/{key_id} */
-export const apiKeyPath = (keyId: string) =>
-  `/api/v1/settings/api-keys/${keyId}`;
+  `/api/v1/organizations/me/members/${memberId}`;

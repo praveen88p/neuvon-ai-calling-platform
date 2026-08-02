@@ -8,7 +8,6 @@ from app.schemas.billing import (
     InvoiceListResponse,
     OrderResponse,
     PaymentVerificationResponse,
-    PlanDetails,
     UsageSummary,
     VerifyPaymentRequest,
 )
@@ -19,16 +18,9 @@ router = APIRouter(prefix="/billing", tags=["billing"])
 
 @router.get("/usage", response_model=UsageSummary)
 async def get_usage_summary(current_user: CurrentUserDep) -> UsageSummary:
-    """Current billing period usage vs plan limits."""
+    """Current billing period usage with per-org custom rate."""
     service = BillingService()
     return await service.get_usage_summary(current_user)
-
-
-@router.get("/plan", response_model=PlanDetails)
-async def get_plan_details(current_user: CurrentUserDep) -> PlanDetails:
-    """Current organization plan details and features."""
-    service = BillingService()
-    return await service.get_plan_details(current_user)
 
 
 @router.post("/orders", response_model=OrderResponse)
