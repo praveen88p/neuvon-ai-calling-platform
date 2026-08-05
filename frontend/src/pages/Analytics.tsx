@@ -1,5 +1,5 @@
 import { useState, useMemo } from "react";
-import { BarChart3, TrendingUp, Phone, Clock, DollarSign, Users } from "lucide-react";
+import { BarChart3, TrendingUp, Phone, Clock, IndianRupee, Users } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -137,8 +137,8 @@ export default function Analytics() {
         />
         <KPICard
           title="Total Cost"
-          value={overviewLoading ? "..." : `$${(overview?.total_cost_usd ?? 0).toFixed(2)}`}
-          icon={DollarSign}
+          value={overviewLoading ? "..." : `₹${(overview?.total_cost_usd ?? 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+          icon={IndianRupee}
         />
       </div>
 

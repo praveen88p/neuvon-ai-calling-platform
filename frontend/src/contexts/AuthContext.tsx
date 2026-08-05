@@ -207,6 +207,67 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     import("@sentry/react").then(Sentry => Sentry.setUser(null)).catch(() => {});
   };
 
+  // ─── Proactive background token refresh ────────────────────────────────────
+  // Decodes the JWT expiry and schedules a silent refresh 60s before it expires.
+  // Runs whenever the token changes so the timer always tracks the latest token.
+  useEffect(() => {
+    if (!token) return;
+
+    let timeoutId: ReturnType<typeof setTimeout>;
+
+    const scheduleRefresh = (currentToken: string) => {
+      try {
+        const parts = currentToken.split(".");
+        if (parts.length !== 3) return;
+        const payload = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+        const decoded = JSON.parse(atob(payload));
+        if (!decoded.exp) return;
+
+        const nowMs = Date.now();
+        const expiresAtMs = decoded.exp * 1000;
+        // Refresh 60 seconds before expiry
+        const refreshInMs = expiresAtMs - nowMs - 60_000;
+
+        if (refreshInMs <= 0) {
+          // Already near/past expiry — refresh immediately
+          doSilentRefresh();
+          return;
+        }
+
+        timeoutId = setTimeout(doSilentRefresh, refreshInMs);
+      } catch {
+        // Malformed token — ignore
+      }
+    };
+
+    const doSilentRefresh = async () => {
+      const storedRefresh = localStorage.getItem("auth_refresh_token");
+      if (!storedRefresh) return;
+      try {
+        const refreshed = await refreshToken(storedRefresh);
+        setToken(refreshed.access_token);
+        // Update stored tokens; keep existing user object
+        const storedUser = localStorage.getItem("auth_user");
+        if (storedUser) {
+          const user = JSON.parse(storedUser);
+          persistAuth(refreshed.access_token, refreshed.refresh_token, user);
+        }
+      } catch {
+        // Silent refresh failed — force logout
+        console.warn("Silent token refresh failed, logging out.");
+        setToken(null);
+        setUser(null);
+        clearAuth();
+      }
+    };
+
+    scheduleRefresh(token);
+
+    return () => {
+      if (timeoutId) clearTimeout(timeoutId);
+    };
+  }, [token]);
+
   return (
     <AuthContext.Provider
       value={{

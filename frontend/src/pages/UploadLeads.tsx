@@ -134,11 +134,23 @@ export default function UploadLeads() {
       toast({ title: "Campaign Created!", description: `${campaignName} is ready to start.` });
       setCurrentStep(3);
     } catch (err: unknown) {
-      toast({
-        title: "Creation Failed",
-        description: err instanceof Error ? err.message : "Failed to create campaign",
-        variant: "destructive",
-      });
+      // 402 = insufficient minute balance
+      const isPaymentRequired =
+        err instanceof Error && (err as { status?: number }).status === 402;
+
+      if (isPaymentRequired) {
+        toast({
+          title: "Insufficient Minutes",
+          description: "You have no minutes available. Go to Settings → Billing to purchase a minute pack.",
+          variant: "destructive",
+        });
+      } else {
+        toast({
+          title: "Creation Failed",
+          description: err instanceof Error ? err.message : "Failed to create campaign",
+          variant: "destructive",
+        });
+      }
     } finally {
       setIsLoading(false);
     }

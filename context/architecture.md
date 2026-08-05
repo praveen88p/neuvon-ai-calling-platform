@@ -640,3 +640,6 @@ Rules that must never be violated:
 12. **Flat org hierarchy.** Every tenant is a top-level organization. No sub-organizations or nesting.
 13. **Client settings are read-only.** Org settings, billing rates, and API keys are managed from the super admin panel — not by clients. Client Settings page only allows profile edits and team management.
 14. **Billing uses per-org custom rates.** No hardcoded plan tiers. Each org has a `rate_per_minute` set by Neuvon admin. Cost = minutes × rate.
+15. **Campaigns require a non-zero minute balance.** `create_campaign` and `start_campaign` both call `_assert_has_minutes` before touching Dograh. If `organizations.minute_balance < 1.0`, the request is rejected with `HTTP 402 Payment Required`. This prevents orgs from running calls at Neuvon's expense.
+16. **Sessions auto-refresh silently.** The frontend `AuthContext` decodes the JWT expiry on login and schedules a background refresh 60 seconds before the token expires. Users are never logged out mid-session due to token expiry.
+17. **Campaign sync is an upsert, not insert-only.** `_backfill_campaign_runs` updates existing `call_runs` records when Dograh has newer status/duration data. Dograh is the source of truth for call state.

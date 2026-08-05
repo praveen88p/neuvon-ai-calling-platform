@@ -376,11 +376,15 @@ class TelephonyService:
         # Update local DB if name changed
         if data.name:
             try:
-                await self.db.database.from_("telephony_configs") \
-                    .update({"label": data.name}) \
-                    .eq("organization_id", str(org_id)) \
-                    .eq("dograh_config_id", config_id) \
-                    .execute()
+                await (
+                    self.db.database.from_("telephony_configs")
+                    .eq("organization_id", str(org_id))
+                    .eq("dograh_config_id", config_id)
+                    .update({"label": data.name})
+                )
+            except ValueError as exc:
+                if "Expecting value" not in str(exc):
+                    logger.warning("telephony.local_update_failed", config_id=config_id, error=str(exc))
             except Exception as exc:
                 logger.warning("telephony.local_update_failed", config_id=config_id, error=str(exc))
 
@@ -442,16 +446,27 @@ class TelephonyService:
         # Update local DB: clear old default, set new
         try:
             # Clear all defaults for this org
-            await self.db.database.from_("telephony_configs") \
-                .update({"is_default_outbound": False}) \
-                .eq("organization_id", str(org_id)) \
-                .execute()
+            await (
+                self.db.database.from_("telephony_configs")
+                .eq("organization_id", str(org_id))
+                .update({"is_default_outbound": False})
+            )
+        except ValueError as exc:
+            if "Expecting value" not in str(exc):
+                logger.warning("telephony.local_default_update_failed", config_id=config_id, error=str(exc))
+        except Exception as exc:
+            logger.warning("telephony.local_default_update_failed", config_id=config_id, error=str(exc))
+        try:
             # Set the new default
-            await self.db.database.from_("telephony_configs") \
-                .update({"is_default_outbound": True}) \
-                .eq("organization_id", str(org_id)) \
-                .eq("dograh_config_id", config_id) \
-                .execute()
+            await (
+                self.db.database.from_("telephony_configs")
+                .eq("organization_id", str(org_id))
+                .eq("dograh_config_id", config_id)
+                .update({"is_default_outbound": True})
+            )
+        except ValueError as exc:
+            if "Expecting value" not in str(exc):
+                logger.warning("telephony.local_default_update_failed", config_id=config_id, error=str(exc))
         except Exception as exc:
             logger.warning("telephony.local_default_update_failed", config_id=config_id, error=str(exc))
 
@@ -507,13 +522,17 @@ class TelephonyService:
         dograh_phone_id = result.get("id")
 
         # 2. Save to local DB with org ownership
+        import re
+        number_normalized = re.sub(r"\s+", "", data.address or "")
         local_record = {
             "organization_id": str(org_id),
             "telephony_config_id": local_config["id"],
             "dograh_phone_id": dograh_phone_id,
             "number": data.address,
+            "number_normalized": number_normalized,
             "label": data.label or "",
             "is_default_caller": data.is_default_caller_id,
+            "inbound_workflow_id": data.inbound_workflow_id,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
         try:
@@ -567,7 +586,11 @@ class TelephonyService:
         await self._verify_config_ownership(config_id, str(org_id))
         await self._verify_phone_ownership(phone_number_id, str(org_id))
 
-        update_data = data.model_dump(exclude_none=True)
+        # Re-dump using model_fields_set to only include fields the caller actually sent
+        update_data = {
+            k: v for k, v in data.model_dump().items()
+            if k in data.model_fields_set
+        }
         try:
             result = await self.dograh.update_phone_number(config_id, phone_number_id, update_data)
         except Exception as exc:
@@ -583,13 +606,26 @@ class TelephonyService:
             local_updates["label"] = data.label or ""
         if data.is_default_caller_id is not None:
             local_updates["is_default_caller"] = data.is_default_caller_id
+        # Always sync inbound_workflow_id when explicitly set (even to None to clear)
+        if "inbound_workflow_id" in data.model_fields_set:
+            local_updates["inbound_workflow_id"] = data.inbound_workflow_id
         if local_updates:
             try:
-                await self.db.database.from_("phone_numbers") \
-                    .update(local_updates) \
-                    .eq("organization_id", str(org_id)) \
-                    .eq("dograh_phone_id", phone_number_id) \
-                    .execute()
+                # InsForge requires .eq() BEFORE .update() — confirmed by empirical test.
+                # .update().eq() raises AttributeError silently; .eq().update() works
+                # (returns 204 No Content which causes JSONDecodeError — treat as success).
+                await (
+                    self.db.database.from_("phone_numbers")
+                    .eq("organization_id", str(org_id))
+                    .eq("dograh_phone_id", phone_number_id)
+                    .update(local_updates)
+                )
+            except ValueError as exc:
+                # JSONDecodeError (subclass of ValueError) on empty 204 body = success
+                if "Expecting value" in str(exc):
+                    pass  # update succeeded, server returned empty body
+                else:
+                    logger.warning("telephony.local_phone_update_failed", phone_id=phone_number_id, error=str(exc))
             except Exception as exc:
                 logger.warning("telephony.local_phone_update_failed", phone_id=phone_number_id, error=str(exc))
 
@@ -652,15 +688,26 @@ class TelephonyService:
 
         # Update local DB: clear old default for this config, set new
         try:
-            await self.db.database.from_("phone_numbers") \
-                .update({"is_default_caller": False}) \
-                .eq("telephony_config_id", local_config["id"]) \
-                .execute()
-            await self.db.database.from_("phone_numbers") \
-                .update({"is_default_caller": True}) \
-                .eq("organization_id", str(org_id)) \
-                .eq("dograh_phone_id", phone_number_id) \
-                .execute()
+            await (
+                self.db.database.from_("phone_numbers")
+                .eq("telephony_config_id", local_config["id"])
+                .update({"is_default_caller": False})
+            )
+        except ValueError as exc:
+            if "Expecting value" not in str(exc):
+                logger.warning("telephony.local_caller_update_failed", phone_id=phone_number_id, error=str(exc))
+        except Exception as exc:
+            logger.warning("telephony.local_caller_update_failed", phone_id=phone_number_id, error=str(exc))
+        try:
+            await (
+                self.db.database.from_("phone_numbers")
+                .eq("organization_id", str(org_id))
+                .eq("dograh_phone_id", phone_number_id)
+                .update({"is_default_caller": True})
+            )
+        except ValueError as exc:
+            if "Expecting value" not in str(exc):
+                logger.warning("telephony.local_caller_update_failed", phone_id=phone_number_id, error=str(exc))
         except Exception as exc:
             logger.warning("telephony.local_caller_update_failed", phone_id=phone_number_id, error=str(exc))
 

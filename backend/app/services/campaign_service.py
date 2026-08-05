@@ -122,6 +122,33 @@ class CampaignService:
         self.dograh = DograhClient()
         self.db = get_insforge_admin()
 
+    async def _assert_has_minutes(self, org_id: str) -> None:
+        """Raise HTTP 402 if the org has insufficient minute balance.
+
+        Called before any campaign create/start operation so calls are
+        never placed against an empty balance.
+        """
+        try:
+            rows = await self.db.database.from_("organizations") \
+                .select("minute_balance") \
+                .eq("id", str(org_id)) \
+                .execute()
+            rows = rows if isinstance(rows, list) else []
+            balance = float(rows[0].get("minute_balance", 0) if rows else 0)
+        except Exception as exc:
+            logger.warning("campaign.balance_check_failed", org_id=org_id, error=str(exc))
+            # Fail open — don't block if DB read fails
+            return
+
+        if balance < 1.0:
+            raise HTTPException(
+                status_code=status.HTTP_402_PAYMENT_REQUIRED,
+                detail=(
+                    f"Insufficient minute balance ({balance:.1f} min). "
+                    "Purchase a minute pack from Settings → Billing to run campaigns."
+                ),
+            )
+
     # ------------------------------------------------------------------
     # Upload contacts
     # ------------------------------------------------------------------
@@ -212,6 +239,9 @@ class CampaignService:
         """Create campaign in both Dograh and local DB."""
         org_id = current_user.organization_id
 
+        # Pre-flight: block if org has no minutes
+        await self._assert_has_minutes(org_id)
+
         await self._verify_agent_ownership(data.workflow_id, org_id)
 
         dograh_payload: dict = {
@@ -230,6 +260,17 @@ class CampaignService:
             result = await self.dograh.create_campaign(dograh_payload)
         except Exception as exc:
             logger.error("campaign.create_failed", org_id=org_id, error=str(exc), payload=dograh_payload)
+            # Surface Dograh 4xx validation errors directly to the user
+            import httpx
+            if isinstance(exc, httpx.HTTPStatusError) and 400 <= exc.response.status_code < 500:
+                try:
+                    detail = exc.response.json().get("detail", str(exc))
+                except Exception:
+                    detail = str(exc)
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=detail,
+                ) from exc
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail=f"Failed to create campaign in voice provider: {exc}",
@@ -405,6 +446,10 @@ class CampaignService:
     ) -> CampaignActionResponse:
         """Start a draft or paused campaign."""
         org_id = current_user.organization_id
+
+        # Pre-flight: block if org has no minutes (also catches re-starting paused campaigns)
+        await self._assert_has_minutes(org_id)
+
         local = await self._get_local_campaign(campaign_id, org_id)
 
         try:
@@ -560,9 +605,9 @@ class CampaignService:
     ) -> dict:
         """Get run records for all contacts in a campaign from Dograh.
 
-        Also performs lazy sync: backfills any missing runs into
-        the local call_runs table so analytics, billing, and call
-        detail pages work even if the webhook was missed.
+        Also performs lazy sync (upsert): updates existing runs AND backfills
+        missing ones so analytics, billing, and call detail pages always
+        reflect the latest state from Dograh (the source of truth).
         """
         org_id = current_user.organization_id
         local = await self._get_local_campaign(campaign_id, org_id)
@@ -591,13 +636,26 @@ class CampaignService:
             # Dograh nests duration inside cost_info
             ci = r.get("cost_info") or {}
 
-            # Derive status from is_completed flag (Dograh has no top-level status)
-            if gc.get("error"):
+            # Derive status — check multiple fields Dograh may use
+            # Priority: top-level status → is_completed → completed flag
+            top_status = r.get("status", "")
+            if top_status in ("completed", "failed", "in_progress", "pending"):
+                run_status = top_status
+            elif gc.get("error"):
                 run_status = "failed"
-            elif r.get("is_completed"):
+            elif r.get("is_completed") or r.get("completed"):
                 run_status = "completed"
             else:
                 run_status = "in_progress"
+
+            # Derive duration — check multiple locations Dograh may store it
+            duration = (
+                r.get("duration_seconds")
+                or r.get("call_duration_seconds")
+                or ci.get("call_duration_seconds")
+                or ci.get("duration_seconds")
+                or 0
+            )
 
             runs.append({
                 "run_id": r.get("id", 0),
@@ -610,7 +668,7 @@ class CampaignService:
                 "disposition_code": gc.get("mapped_call_disposition", gc.get("call_disposition")),
                 "phone_number": ic.get("phone_number", ic.get("called_number")),
                 "caller_number": ic.get("caller_number"),
-                "duration_seconds": ci.get("call_duration_seconds"),
+                "duration_seconds": duration,
                 "cost": None,
                 "recording_url": r.get("recording_url"),
                 "transcript_url": r.get("transcript_url"),
@@ -619,7 +677,7 @@ class CampaignService:
                 "completed_at": None,
             })
 
-        # Lazy sync: backfill missing runs into local call_runs table
+        # Lazy sync: upsert all runs — update existing, insert new
         await self._backfill_campaign_runs(runs, org_id, local)
 
         return {"runs": runs}
@@ -630,10 +688,14 @@ class CampaignService:
         org_id: str,
         local_campaign: dict,
     ) -> None:
-        """Backfill campaign runs into local call_runs table.
+        """Upsert campaign runs into local call_runs table.
 
-        Safety net: ensures data exists locally even if the webhook was
-        missed. Uses dograh_run_id as dedup key (idempotent).
+        - Existing runs that are stale (still in_progress or 0 duration)
+          get updated with the latest data from Dograh.
+        - New runs (not yet in local DB) get inserted.
+
+        Dograh is the source of truth — this runs on every call to
+        get_campaign_runs so the dashboard always shows current data.
         """
         if not normalized_runs:
             return
@@ -642,51 +704,99 @@ class CampaignService:
         if not run_ids:
             return
 
-        # Find which runs already exist locally
+        # Fetch all existing local records for these run IDs
         try:
-            existing = await self.db.database.from_("call_runs") \
-                .select("dograh_run_id") \
+            existing_rows = await self.db.database.from_("call_runs") \
+                .select("id, dograh_run_id, status, duration_seconds") \
                 .eq("organization_id", org_id) \
                 .in_("dograh_run_id", run_ids) \
                 .execute()
-            existing = existing if isinstance(existing, list) else []
-            existing_ids = {r["dograh_run_id"] for r in existing}
+            existing_rows = existing_rows if isinstance(existing_rows, list) else []
+            # Map dograh_run_id → local record
+            existing_map = {r["dograh_run_id"]: r for r in existing_rows}
         except Exception as exc:
             logger.warning("campaign.backfill_lookup_failed", error=str(exc))
             return
 
-        # Insert only missing runs
+        now_iso = datetime.now(timezone.utc).isoformat()
         to_insert = []
+        to_update = []  # list of (local_id, updates_dict)
+
         for run in normalized_runs:
             rid = run.get("run_id")
-            if not rid or rid in existing_ids:
+            if not rid:
                 continue
-            to_insert.append({
-                "organization_id": org_id,
-                "dograh_run_id": rid,
-                "dograh_workflow_id": run.get("workflow_id", local_campaign.get("dograh_workflow_id")),
-                "call_type": run.get("call_type", "outbound"),
-                "status": run.get("status", "completed"),
-                "phone_number": run.get("phone_number", ""),
-                "caller_number": run.get("caller_number", ""),
-                "duration_seconds": run.get("duration_seconds") or 0,
-                "disposition": run.get("disposition_code"),
-                "campaign_id": str(local_campaign.get("id", "")),
-            })
 
-        if not to_insert:
-            return
+            new_status = run.get("status", "in_progress")
+            new_duration = run.get("duration_seconds") or 0
 
-        try:
-            await self.db.database.from_("call_runs").insert(to_insert)
+            if rid in existing_map:
+                # Run exists locally — update only if data has changed
+                local_rec = existing_map[rid]
+                current_status = local_rec.get("status", "")
+                current_duration = local_rec.get("duration_seconds", 0) or 0
+
+                # Only update if Dograh has newer/better data
+                needs_update = (
+                    (current_status != new_status)
+                    or (current_duration == 0 and new_duration > 0)
+                )
+                if needs_update:
+                    updates: dict = {
+                        "status": new_status,
+                        "duration_seconds": new_duration,
+                    }
+                    if run.get("disposition_code"):
+                        updates["disposition"] = run["disposition_code"]
+                    if new_status in ("completed", "failed"):
+                        updates["completed_at"] = now_iso
+                    to_update.append((local_rec["id"], updates))
+            else:
+                # New run — insert it
+                to_insert.append({
+                    "organization_id": org_id,
+                    "dograh_run_id": rid,
+                    "dograh_workflow_id": run.get("workflow_id", local_campaign.get("dograh_workflow_id")),
+                    "call_type": run.get("call_type", "outbound"),
+                    "status": new_status,
+                    "phone_number": run.get("phone_number", ""),
+                    "caller_number": run.get("caller_number", ""),
+                    "duration_seconds": new_duration,
+                    "disposition": run.get("disposition_code"),
+                    "campaign_id": str(local_campaign.get("id", "")),
+                    **({"completed_at": now_iso} if new_status in ("completed", "failed") else {}),
+                })
+
+        # Perform updates
+        for local_id, updates in to_update:
+            try:
+                await self.db.database.from_("call_runs") \
+                    .eq("id", local_id) \
+                    .update(updates)
+            except Exception as exc:
+                logger.warning("campaign.backfill_update_failed", local_id=local_id, error=str(exc))
+
+        # Perform inserts
+        if to_insert:
+            try:
+                await self.db.database.from_("call_runs").insert(to_insert)
+                logger.info(
+                    "campaign.backfill_inserted",
+                    org_id=org_id,
+                    count=len(to_insert),
+                    campaign_id=local_campaign.get("dograh_campaign_id"),
+                )
+            except Exception as exc:
+                logger.warning("campaign.backfill_insert_failed", error=str(exc))
+
+        if to_update:
             logger.info(
-                "campaign.backfill_synced",
+                "campaign.backfill_updated",
                 org_id=org_id,
-                count=len(to_insert),
+                count=len(to_update),
                 campaign_id=local_campaign.get("dograh_campaign_id"),
             )
-        except Exception as exc:
-            logger.warning("campaign.backfill_insert_failed", error=str(exc))
+
 
     # ------------------------------------------------------------------
     # Helpers

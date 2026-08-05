@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { Phone, Clock, TrendingUp, DollarSign, Upload, Radio } from "lucide-react";
+import { Phone, Clock, TrendingUp, IndianRupee, Upload, Radio } from "lucide-react";
 import { KPICard } from "@/components/KPICard";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -204,10 +204,10 @@ export default function Dashboard() {
             />
             <KPICard
               title="Total Cost"
-              value={`$${overview.total_cost_usd.toFixed(2)}`}
+              value={`₹${overview.total_cost_usd.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
               change={`Across ${overview.total_campaigns} campaigns`}
               changeType="neutral"
-              icon={DollarSign}
+              icon={IndianRupee}
             />
           </>
         )}

@@ -12,7 +12,8 @@ class AnalyticsOverview(BaseModel):
     success_rate: float = Field(default=0.0, description="Percentage of successful calls")
     total_campaigns: int = Field(default=0, description="Active campaigns in the period")
     total_agents: int = Field(default=0, description="Active agents used")
-    total_cost_usd: float = Field(default=0.0, description="Total cost in USD")
+    total_cost_usd: float = Field(default=0.0, description="Total cost in INR (rate × minutes)")
+    rate_per_minute: float = Field(default=0.0, description="Org rate per minute in INR")
 
 
 class TimeSeriesPoint(BaseModel):

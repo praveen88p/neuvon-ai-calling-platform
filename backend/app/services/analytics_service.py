@@ -37,7 +37,11 @@ class AnalyticsService:
         start_date: str | None = None,
         end_date: str | None = None,
     ) -> AnalyticsOverview:
-        """KPI summary: total calls, minutes, success rate, cost."""
+        """KPI summary: total calls, minutes, success rate, cost.
+
+        Cost is computed from the org's rate_per_minute (set by Neuvon admin)
+        instead of Dograh's cost_info (which is Dograh's internal pricing).
+        """
         org_id = current_user.organization_id
         runs = await self._fetch_runs(org_id, start_date, end_date)
 
@@ -52,11 +56,9 @@ class AnalyticsService:
         completed = sum(1 for r in runs if r.get("status") == "completed")
         success_rate = round((completed / total_calls) * 100, 1) if total_calls else 0.0
 
-        total_cost = 0.0
-        for r in runs:
-            cost_info = r.get("cost_info")
-            if isinstance(cost_info, dict):
-                total_cost += cost_info.get("total_cost", 0) or 0
+        # Calculate cost from org's rate instead of Dograh's cost_info
+        rate_per_minute = await self._get_org_rate(org_id)
+        total_cost = round(total_minutes * rate_per_minute, 2)
 
         unique_agents = len({r.get("dograh_workflow_id") for r in runs if r.get("dograh_workflow_id")})
         unique_campaigns = len({str(r.get("campaign_id")) for r in runs if r.get("campaign_id")})
@@ -68,7 +70,8 @@ class AnalyticsService:
             success_rate=success_rate,
             total_campaigns=unique_campaigns,
             total_agents=unique_agents,
-            total_cost_usd=round(total_cost, 2),
+            total_cost_usd=total_cost,
+            rate_per_minute=rate_per_minute,
         )
 
     async def get_calls_over_time(
@@ -157,6 +160,7 @@ class AnalyticsService:
         """Per-agent metrics table."""
         org_id = current_user.organization_id
         runs = await self._fetch_runs(org_id, start_date, end_date)
+        rate_per_minute = await self._get_org_rate(org_id)
 
         agent_data: dict[int, dict] = {}
         for r in runs:
@@ -176,8 +180,8 @@ class AnalyticsService:
             if r.get("status") == "completed":
                 bucket["completed"] += 1
             cost_info = r.get("cost_info")
-            if isinstance(cost_info, dict):
-                bucket["cost"] += cost_info.get("total_cost", 0) or 0
+            # Agent cost is calculated from org rate × agent minutes
+            # (cost_info from Dograh is their internal pricing, not ours)
 
         agent_names = await self._get_agent_names(org_id, list(agent_data.keys()))
 
@@ -193,7 +197,7 @@ class AnalyticsService:
                     total_minutes=round(total_secs / 60, 2),
                     average_duration_seconds=round(total_secs / total_calls, 1) if total_calls else 0.0,
                     success_rate=round((bucket["completed"] / total_calls) * 100, 1) if total_calls else 0.0,
-                    total_cost_usd=round(bucket["cost"], 2),
+                    total_cost_usd=round((total_secs / 60) * rate_per_minute, 2),
                 )
             )
 
@@ -341,3 +345,18 @@ class AnalyticsService:
         except Exception as exc:
             logger.warning("analytics.campaign_names_failed", error=str(exc))
             return {}
+
+    async def _get_org_rate(self, org_id: str) -> float:
+        """Get the org's rate_per_minute from the organizations table."""
+        try:
+            rows = await self.db.database.from_("organizations") \
+                .select("rate_per_minute") \
+                .eq("id", org_id) \
+                .limit(1) \
+                .execute()
+            rows = rows if isinstance(rows, list) else []
+            if rows:
+                return float(rows[0].get("rate_per_minute", 3.50) or 3.50)
+        except Exception as exc:
+            logger.warning("analytics.org_rate_failed", org_id=org_id, error=str(exc))
+        return 3.50  # Fallback default

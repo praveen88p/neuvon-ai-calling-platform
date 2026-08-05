@@ -286,7 +286,11 @@ class DograhClient:
         )
 
     async def add_phone_number(self, config_id: int, data: dict) -> dict:
-        """POST /organizations/telephony-configs/{config_id}/phone-numbers."""
+        """POST /organizations/telephony-configs/{config_id}/phone-numbers.
+
+        Dograh's API uses `inbound_workflow_id` in both GET responses and PUT/POST bodies.
+        Send data as-is — no field name translation needed.
+        """
         return await self._request(
             "POST", f"/organizations/telephony-configs/{config_id}/phone-numbers", json=data,
         )
@@ -298,7 +302,13 @@ class DograhClient:
         )
 
     async def update_phone_number(self, config_id: int, phone_number_id: int, data: dict) -> dict:
-        """PUT .../phone-numbers/{phone_number_id}."""
+        """PUT .../phone-numbers/{phone_number_id}.
+
+        Dograh's API uses `inbound_workflow_id` in both GET responses and PUT bodies.
+        Confirmed by live API test: sending `inbound_workflow` is silently ignored;
+        sending `inbound_workflow_id` saves correctly and updates `updated_at`.
+        Send data as-is — no field name translation needed.
+        """
         return await self._request(
             "PUT", f"/organizations/telephony-configs/{config_id}/phone-numbers/{phone_number_id}",
             json=data,

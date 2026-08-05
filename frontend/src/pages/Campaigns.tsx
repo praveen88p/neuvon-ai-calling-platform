@@ -1,5 +1,5 @@
 import { useState, useMemo } from "react";
-import { Plus, Search, Loader2, Play, Pause, RotateCcw, Megaphone } from "lucide-react";
+import { Plus, Search, Loader2, Play, Pause, RotateCcw, Megaphone, CreditCard } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -56,11 +56,30 @@ export default function Campaigns() {
       });
       queryClient.invalidateQueries({ queryKey: ["campaigns"] });
     } catch (err: unknown) {
-      toast({
-        title: "Action Failed",
-        description: err instanceof Error ? err.message : "Unknown error",
-        variant: "destructive",
-      });
+      // 402 = insufficient minute balance — show billing-specific message
+      const isPaymentRequired =
+        err instanceof Error && (err as { status?: number }).status === 402;
+
+      if (isPaymentRequired) {
+        toast({
+          title: "Insufficient Minutes",
+          description: (
+            <span>
+              You have no minutes available.{" "}
+              <a href="/settings?tab=billing" className="underline font-medium">
+                Buy minutes →
+              </a>
+            </span>
+          ) as unknown as string,
+          variant: "destructive",
+        });
+      } else {
+        toast({
+          title: "Action Failed",
+          description: err instanceof Error ? err.message : "Unknown error",
+          variant: "destructive",
+        });
+      }
     }
   };
 

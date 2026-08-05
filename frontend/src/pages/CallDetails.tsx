@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { useParams, Link } from "react-router-dom";
-import { ArrowLeft, Loader2, Phone, Clock, FileText, Mic, DollarSign, Bot } from "lucide-react";
+import { ArrowLeft, Loader2, Phone, Clock, FileText, Mic, IndianRupee, Bot } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { apiGet } from "@/utils/api";
@@ -124,12 +124,12 @@ export default function CallDetails() {
         </Card>
         <Card>
           <CardContent className="pt-6 flex items-center gap-3">
-            <DollarSign className="h-5 w-5 text-muted-foreground" />
+            <IndianRupee className="h-5 w-5 text-muted-foreground" />
             <div>
               <p className="text-xs text-muted-foreground">Cost</p>
               <p className="font-medium">
                 {call.cost_info
-                  ? `$${(call.cost_info as Record<string, number>).total_cost?.toFixed(2) ?? "-"}`
+                  ? `₹${(call.cost_info as Record<string, number>).total_cost?.toFixed(2) ?? "-"}`
                   : "-"}
               </p>
             </div>

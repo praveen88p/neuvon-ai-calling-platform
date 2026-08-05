@@ -73,6 +73,7 @@ export interface AnalyticsOverview {
   total_campaigns: number;
   total_agents: number;
   total_cost_usd: number;
+  rate_per_minute: number;
 }
 
 export interface TimeSeriesPoint {
