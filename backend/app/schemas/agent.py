@@ -86,6 +86,36 @@ class AgentCountResponse(BaseModel):
 
 
 class TestRunCreate(BaseModel):
-    """Create a test run for an agent without placing a real call."""
+    """Create a test run for an agent without placing a real call.
 
+    Dograh requires `mode` and `name` in the body. Mode is always "test"
+    (set by DograhClient); name is a label for the run.
+    """
+
+    name: str = Field(default="Test Run", max_length=200)
     initial_context: dict | None = None
+
+
+class TestCallCreate(BaseModel):
+    """Trigger a real phone call to test an agent.
+
+    The agent will call the provided phone_number. This is provider-agnostic:
+    Dograh routes through whatever telephony provider is configured on the agent.
+    """
+
+    phone_number: str = Field(
+        ...,
+        min_length=10,
+        max_length=20,
+        description="E.164 phone number to call, e.g. +919876543210",
+    )
+    initial_context: dict | None = None
+
+
+class TestCallResponse(BaseModel):
+    """Response from triggering a test phone call."""
+
+    status: str
+    workflow_run_id: int | None = None
+    workflow_run_name: str | None = None
+    message: str

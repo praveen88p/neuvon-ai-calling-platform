@@ -1,11 +1,11 @@
 import { useState } from "react";
-import { Bot, Plus, Archive, RotateCcw, Play, Loader2, Search } from "lucide-react";
+import { Bot, Plus, Archive, RotateCcw, Phone, Loader2, Search, CheckCircle2, XCircle } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useApiQuery } from "@/hooks/useApiQuery";
-import { apiPost, apiPatch, apiDelete } from "@/utils/api";
-import { API_PATHS, agentPath, agentStatusPath, agentTestRunPath } from "@/utils/apiPaths";
+import { apiPost, apiPatch } from "@/utils/api";
+import { API_PATHS, agentStatusPath, agentTestCallPath } from "@/utils/apiPaths";
 import { useToast } from "@/hooks/use-toast";
 import { useQueryClient } from "@tanstack/react-query";
 import {
@@ -17,7 +17,7 @@ import {
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import type { AgentListResponse, AgentResponse } from "@/types/api";
+import type { AgentListResponse, AgentResponse, TestCallResponse } from "@/types/api";
 
 // ─── Status badge ────────────────────────────────────────────────────────────
 
@@ -32,6 +32,139 @@ function AgentStatusBadge({ status }: { status: string | null }) {
     <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${classes}`}>
       {s.charAt(0).toUpperCase() + s.slice(1)}
     </span>
+  );
+}
+
+// ─── Test Call Dialog ────────────────────────────────────────────────────────
+
+function TestCallDialog({ agent }: { agent: AgentResponse }) {
+  const [open, setOpen] = useState(false);
+  const [phoneNumber, setPhoneNumber] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState<{ success: boolean; message: string; runId?: number } | null>(null);
+  const { toast } = useToast();
+
+  const handleCall = async () => {
+    const trimmed = phoneNumber.trim();
+    if (!trimmed) {
+      toast({ title: "Enter a phone number", variant: "destructive" });
+      return;
+    }
+    // Basic E.164 validation
+    if (!/^\+\d{10,15}$/.test(trimmed)) {
+      toast({
+        title: "Invalid number",
+        description: "Use E.164 format: +919876543210",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setLoading(true);
+    setResult(null);
+    try {
+      const res = await apiPost<TestCallResponse>(agentTestCallPath(agent.workflow_id), {
+        phone_number: trimmed,
+      });
+      setResult({
+        success: true,
+        message: res.message || "Agent is calling your number now",
+        runId: res.workflow_run_id ?? undefined,
+      });
+      toast({ title: "Call Initiated", description: `${agent.name} is calling ${trimmed}` });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to trigger call";
+      setResult({ success: false, message: msg });
+      toast({ title: "Call Failed", description: msg, variant: "destructive" });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleOpenChange = (isOpen: boolean) => {
+    setOpen(isOpen);
+    if (!isOpen) {
+      // Reset state when dialog closes
+      setResult(null);
+      setLoading(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={handleOpenChange}>
+      <DialogTrigger asChild>
+        <Button
+          variant="outline"
+          size="sm"
+          className="flex-1"
+          disabled={agent.status === "archived"}
+        >
+          <Phone className="mr-1 h-3 w-3" />
+          Test
+        </Button>
+      </DialogTrigger>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Test Agent: {agent.name}</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-4 py-2">
+          <p className="text-sm text-muted-foreground">
+            The agent will call your phone number. You can talk to it in real time
+            to verify its behavior.
+          </p>
+          <div className="space-y-2">
+            <Label htmlFor={`phone-${agent.workflow_id}`}>Your Phone Number</Label>
+            <Input
+              id={`phone-${agent.workflow_id}`}
+              placeholder="+919876543210"
+              value={phoneNumber}
+              onChange={(e) => setPhoneNumber(e.target.value)}
+              disabled={loading}
+            />
+            <p className="text-xs text-muted-foreground">
+              Include country code (e.g. +91 for India, +1 for US)
+            </p>
+          </div>
+
+          {/* Result display */}
+          {result && (
+            <div
+              className={`flex items-start gap-2 rounded-md p-3 text-sm ${
+                result.success
+                  ? "bg-emerald-50 text-emerald-800 border border-emerald-200"
+                  : "bg-red-50 text-red-800 border border-red-200"
+              }`}
+            >
+              {result.success ? (
+                <CheckCircle2 className="h-4 w-4 mt-0.5 shrink-0" />
+              ) : (
+                <XCircle className="h-4 w-4 mt-0.5 shrink-0" />
+              )}
+              <div>
+                <p>{result.message}</p>
+                {result.runId && (
+                  <p className="text-xs mt-1 opacity-70">Run ID: {result.runId}</p>
+                )}
+              </div>
+            </div>
+          )}
+
+          <Button onClick={handleCall} disabled={loading} className="w-full">
+            {loading ? (
+              <>
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                Initiating call...
+              </>
+            ) : (
+              <>
+                <Phone className="mr-2 h-4 w-4" />
+                Call Me Now
+              </>
+            )}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -133,7 +266,7 @@ function CreateAgentDialog({ onCreated }: { onCreated: () => void }) {
               rows={4}
             />
             <p className="text-xs text-muted-foreground">
-              A Dograh workflow will be generated from this description.
+              A workflow will be generated from this description.
             </p>
           </div>
           <Button onClick={handleCreate} disabled={loading} className="w-full">
@@ -182,19 +315,6 @@ export default function Agents() {
     }
   };
 
-  const handleTestRun = async (agent: AgentResponse) => {
-    try {
-      await apiPost(agentTestRunPath(agent.workflow_id), {});
-      toast({ title: "Test Run Started", description: `Test run triggered for ${agent.name}.` });
-    } catch (err: unknown) {
-      toast({
-        title: "Test Run Failed",
-        description: err instanceof Error ? err.message : "Unknown error",
-        variant: "destructive",
-      });
-    }
-  };
-
   const refreshAgents = () => {
     queryClient.invalidateQueries({ queryKey: ["agents"] });
   };
@@ -206,7 +326,7 @@ export default function Agents() {
         <div>
           <h1 className="text-3xl font-bold text-foreground">Agents</h1>
           <p className="text-muted-foreground">
-            Manage your AI calling agents (Dograh workflows).
+            Manage your AI calling agents.
           </p>
         </div>
         <CreateAgentDialog onCreated={refreshAgents} />
@@ -288,16 +408,7 @@ export default function Agents() {
                     </div>
                   )}
                   <div className="flex gap-2 pt-2">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="flex-1"
-                      onClick={() => handleTestRun(agent)}
-                      disabled={agent.status === "archived"}
-                    >
-                      <Play className="mr-1 h-3 w-3" />
-                      Test
-                    </Button>
+                    <TestCallDialog agent={agent} />
                     <Button
                       variant="ghost"
                       size="sm"

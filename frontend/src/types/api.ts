@@ -163,7 +163,20 @@ export interface AgentCountResponse {
   total: number;
 }
 
+export interface TestCallCreate {
+  phone_number: string;
+  initial_context?: Record<string, unknown>;
+}
+
+export interface TestCallResponse {
+  status: string;
+  workflow_run_id: number | null;
+  workflow_run_name: string | null;
+  message: string;
+}
+
 // ─── Campaigns ───────────────────────────────────────────────────────────────
+
 
 export interface CampaignResponse {
   id: string;

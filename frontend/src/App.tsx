@@ -19,6 +19,7 @@ import CallHistory from "./pages/CallHistory";
 import CallDetails from "./pages/CallDetails";
 import Analytics from "./pages/Analytics";
 import Appointments from "./pages/Appointments";
+import KnowledgeBase from "./pages/KnowledgeBase";
 import Settings from "./pages/Settings";
 import PhoneNumbers from "./pages/PhoneNumbers";
 import Logs from "./pages/admin/Logs";
@@ -83,6 +84,7 @@ const App = () => (
                         <Route path="/call-details/:id" element={<CallDetails />} />
                         <Route path="/analytics" element={<Analytics />} />
                         <Route path="/appointments" element={<Appointments />} />
+                        <Route path="/knowledge-base" element={<KnowledgeBase />} />
                         <Route path="/settings" element={<Settings />} />
                         <Route path="/phone-numbers" element={<PhoneNumbers />} />
                         <Route path="/admin/logs" element={<Logs />} />

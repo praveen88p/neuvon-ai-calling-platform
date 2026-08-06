@@ -9,6 +9,7 @@ from fastapi import HTTPException, status
 from app.core.config import get_settings
 from app.core.logging import logger
 from app.core.posthog import track_event
+from app.integrations.dograh_client import DograhClient
 from app.integrations.insforge_client import get_insforge_admin
 from app.integrations.razorpay_client import RazorpayService
 from app.schemas.auth import UserContext
@@ -49,6 +50,10 @@ class BillingService:
             period_end = today.replace(year=today.year + 1, month=1, day=1) - timedelta(days=1)
         else:
             period_end = today.replace(month=today.month + 1, day=1) - timedelta(days=1)
+
+        # Fallback sync: pull any missed runs from Dograh before aggregating.
+        # This is a safety net in case the webhook was delayed or missed.
+        await self._sync_missing_runs(org_id)
 
         # Get per-org rate, fees, and quota
         rate, platform_fee, plan_label, minutes_limit = await self._get_org_billing_info(org_id)
@@ -351,3 +356,136 @@ class BillingService:
         except Exception as exc:
             logger.warning("billing.cost_aggregate_failed", org_id=org_id, error=str(exc))
             return 0.0
+
+    async def _sync_missing_runs(self, org_id: str) -> None:
+        """Fallback sync: fetch recent completed runs from Dograh and write
+        any missing ones to call_runs.
+
+        Called at the start of get_usage_summary() as a safety net in case
+        the Dograh webhook was missed (e.g. server was down, network error).
+        Idempotent — skips runs already in call_runs by dograh_run_id.
+        Also deducts minutes for newly synced completed runs.
+        """
+        dograh = DograhClient()
+
+        # 1. Fetch recent runs from Dograh (up to 100)
+        try:
+            result = await dograh._request(
+                "GET",
+                "/organizations/usage/runs",
+                params={"page": 1, "page_size": 100},
+            )
+            if isinstance(result, dict):
+                all_runs = result.get("runs", [])
+            else:
+                all_runs = result if isinstance(result, list) else []
+        except Exception as exc:
+            logger.warning("billing.sync_fetch_failed", org_id=org_id, error=str(exc))
+            return
+
+        if not all_runs:
+            return
+
+        # 2. Get workflow_ids that belong to this org from dograh_agent_mappings
+        try:
+            mapping_rows = await self.db.database.from_("dograh_agent_mappings") \
+                .select("dograh_workflow_id") \
+                .eq("organization_id", org_id) \
+                .execute()
+            mapping_rows = mapping_rows if isinstance(mapping_rows, list) else []
+            org_workflow_ids = {
+                int(r["dograh_workflow_id"]) for r in mapping_rows
+                if r.get("dograh_workflow_id")
+            }
+        except Exception as exc:
+            logger.warning("billing.sync_mapping_failed", org_id=org_id, error=str(exc))
+            return
+
+        if not org_workflow_ids:
+            return
+
+        # 3. Filter to this org's runs (all completed runs from usage/runs endpoint)
+        org_runs = [
+            r for r in all_runs
+            if r.get("workflow_id") in org_workflow_ids
+        ]
+
+        if not org_runs:
+            return
+
+        # 4. Get all dograh_run_ids already in call_runs for this org
+        try:
+            existing_rows = await self.db.database.from_("call_runs") \
+                .select("dograh_run_id") \
+                .eq("organization_id", org_id) \
+                .execute()
+            existing_rows = existing_rows if isinstance(existing_rows, list) else []
+            existing_run_ids = {r["dograh_run_id"] for r in existing_rows if r.get("dograh_run_id")}
+        except Exception as exc:
+            logger.warning("billing.sync_existing_failed", org_id=org_id, error=str(exc))
+            return
+
+        # 5. Insert missing runs
+        now_iso = datetime.now(timezone.utc).isoformat()
+        newly_synced_minutes = 0.0
+
+        for run in org_runs:
+            run_id = run.get("id")
+            if not run_id or run_id in existing_run_ids:
+                continue
+
+            # call_duration_seconds is the field name in /organizations/usage/runs
+            duration_seconds = int(run.get("call_duration_seconds") or 0)
+            cost_info = run.get("cost_info") or {}
+
+            record = {
+                "organization_id": org_id,
+                "dograh_run_id": run_id,
+                "dograh_workflow_id": run.get("workflow_id"),
+                "call_type": run.get("call_type") or "outbound",
+                "status": run.get("status") or "completed",
+                "phone_number": run.get("phone_number") or "",
+                "duration_seconds": duration_seconds,
+                "completed_at": now_iso,
+            }
+            if cost_info:
+                record["cost_info"] = json.dumps(cost_info)
+
+            try:
+                await self.db.database.from_("call_runs").insert([record])
+                logger.info(
+                    "billing.sync_run_inserted",
+                    org_id=org_id,
+                    run_id=run_id,
+                    duration_seconds=duration_seconds,
+                )
+                if duration_seconds > 0:
+                    newly_synced_minutes += round(duration_seconds / 60, 2)
+            except Exception as exc:
+                err = str(exc)
+                if "duplicate" in err.lower() or "unique" in err.lower():
+                    pass  # Already exists — race condition, safe to skip
+                else:
+                    logger.warning(
+                        "billing.sync_insert_failed",
+                        run_id=run_id,
+                        error=err,
+                    )
+
+        # 6. Deduct newly synced minutes from org's pre-paid balance
+        if newly_synced_minutes > 0:
+            try:
+                from app.services.topup_service import TopUpService
+                topup = TopUpService()
+                await topup.deduct_minutes(org_id, newly_synced_minutes)
+                logger.info(
+                    "billing.sync_minutes_deducted",
+                    org_id=org_id,
+                    minutes=newly_synced_minutes,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "billing.sync_deduct_failed",
+                    org_id=org_id,
+                    error=str(exc),
+                )

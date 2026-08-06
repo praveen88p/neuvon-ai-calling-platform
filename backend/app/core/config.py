@@ -47,6 +47,10 @@ class Settings(BaseSettings):
 
     # Webhook
     WEBHOOK_SECRET: str = ""
+    # Publicly-accessible URL of this backend (used to auto-configure Dograh webhook nodes).
+    # In dev: ngrok URL. In production: real domain.
+    # e.g. https://compacter-frigidity-everyone.ngrok-free.dev
+    BACKEND_PUBLIC_URL: str = ""
 
     # Sentry
     SENTRY_DSN: str = ""

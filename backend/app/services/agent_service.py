@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 from fastapi import HTTPException, status
 
+from app.core.config import get_settings
 from app.core.logging import logger
 from app.core.posthog import track_event
 from app.integrations.dograh_client import DograhClient
@@ -19,6 +20,8 @@ from app.schemas.agent import (
     AgentResponse,
     AgentStatusUpdate,
     AgentUpdate,
+    TestCallCreate,
+    TestCallResponse,
     TestRunCreate,
 )
 from app.schemas.auth import UserContext
@@ -119,6 +122,9 @@ class AgentService:
             org_id=current_user.organization_id,
         )
 
+        # Auto-inject webhook node so post-call data flows back to our billing system
+        await self._inject_webhook_node(workflow_id)
+
         track_event(
             distinct_id=current_user.organization_id,
             event="agent_created",
@@ -174,6 +180,9 @@ class AgentService:
             name=data.name,
             org_id=current_user.organization_id,
         )
+
+        # Auto-inject webhook node so post-call data flows back to our billing system
+        await self._inject_webhook_node(workflow_id)
 
         track_event(
             distinct_id=current_user.organization_id,
@@ -301,7 +310,7 @@ class AgentService:
         await self._verify_org_access(workflow_id, current_user)
 
         try:
-            body = {}
+            body: dict = {"name": data.name}
             if data.initial_context:
                 body["initial_context"] = data.initial_context
             return await self.dograh.create_test_run(workflow_id, body)
@@ -311,6 +320,62 @@ class AgentService:
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail="Failed to create test run",
             ) from exc
+
+    async def trigger_test_call(
+        self,
+        workflow_id: int,
+        data: TestCallCreate,
+        current_user: UserContext,
+    ) -> TestCallResponse:
+        """Trigger a real outbound phone call to test an agent.
+
+        Provider-agnostic: Dograh routes through whatever telephony provider
+        is configured on the agent. We use the workflow_uuid (trigger UUID)
+        from the /public/agent/{uuid} endpoint.
+        """
+        await self._verify_org_access(workflow_id, current_user)
+
+        workflow_uuid = await self._get_workflow_uuid(workflow_id)
+
+        try:
+            result = await self.dograh.trigger_outbound_call(
+                workflow_uuid=workflow_uuid,
+                phone_number=data.phone_number,
+                initial_context=data.initial_context,
+            )
+        except Exception as exc:
+            logger.error(
+                "agent.test_call_failed",
+                workflow_id=workflow_id,
+                phone_number=data.phone_number,
+                error=str(exc),
+            )
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Failed to trigger test call: {exc}",
+            ) from exc
+
+        track_event(
+            distinct_id=current_user.organization_id,
+            event="agent_test_call",
+            properties={
+                "org_id": current_user.organization_id,
+                "agent_id": str(workflow_id),
+            },
+        )
+
+        logger.info(
+            "agent.test_call_triggered",
+            workflow_id=workflow_id,
+            org_id=current_user.organization_id,
+        )
+
+        return TestCallResponse(
+            status=result.get("status", "initiated"),
+            workflow_run_id=result.get("workflow_run_id"),
+            workflow_run_name=result.get("workflow_run_name"),
+            message="Agent is calling your number now",
+        )
 
     async def list_workflow_runs(
         self, workflow_id: int, current_user: UserContext, page: int = 1, limit: int = 20
@@ -395,3 +460,164 @@ class AgentService:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to create agent mapping",
             ) from exc
+
+    async def _get_workflow_uuid(self, workflow_id: int) -> str:
+        """Get the workflow_uuid (trigger UUID) for a workflow.
+
+        1. Read from local DB (dograh_agent_mappings.dograh_workflow_uuid).
+        2. If empty, fetch from Dograh /workflow/fetch and cache it.
+        3. Raise 404 if not found.
+        """
+        # 1. Check local DB
+        try:
+            rows = await self.db.database.from_("dograh_agent_mappings") \
+                .select("dograh_workflow_uuid") \
+                .eq("dograh_workflow_id", workflow_id) \
+                .execute()
+            rows = rows if isinstance(rows, list) else []
+        except Exception:
+            rows = []
+
+        uuid_val = (rows[0].get("dograh_workflow_uuid", "") if rows else "")
+        if uuid_val:
+            return uuid_val
+
+        # 2. Fetch from Dograh and cache
+        try:
+            all_wf = await self.dograh._request("GET", "/workflow/fetch")
+            workflows = all_wf if isinstance(all_wf, list) else [all_wf]
+        except Exception as exc:
+            logger.error("agent.workflow_fetch_failed", error=str(exc))
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Failed to fetch workflow UUID from Dograh",
+            ) from exc
+
+        for wf in workflows:
+            if wf.get("id") == workflow_id:
+                uuid_val = wf.get("workflow_uuid", "")
+                if uuid_val:
+                    # Cache it in local DB for next time
+                    try:
+                        await (
+                            self.db.database.from_("dograh_agent_mappings")
+                            .eq("dograh_workflow_id", workflow_id)
+                            .update({"dograh_workflow_uuid": uuid_val})
+                        )
+                    except ValueError as ve:
+                        # JSONDecodeError on 204 = success
+                        if "Expecting value" not in str(ve):
+                            logger.warning("agent.uuid_cache_failed", error=str(ve))
+                    except Exception as cache_exc:
+                        logger.warning("agent.uuid_cache_failed", error=str(cache_exc))
+                    return uuid_val
+
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Agent trigger UUID not found. Ensure the agent has an active API trigger.",
+        )
+
+    def _build_webhook_node(self, webhook_url: str) -> dict:
+        """Build the Dograh webhook node definition that sends post-call data to our backend.
+
+        The payload_template uses Dograh's {{variable}} template syntax.
+        Fields map to DograhWebhookPayload in app/schemas/webhook.py.
+        """
+        return {
+            "id": "neuvon-webhook",
+            "type": "webhook",
+            "position": {"x": 900, "y": 300},
+            "data": {
+                "name": "Neuvon Post-Call Sync",
+                "enabled": True,
+                "http_method": "POST",
+                "endpoint_url": webhook_url,
+                "custom_headers": [],
+                "credential_uuid": None,
+                "payload_template": {
+                    "workflow_run_id": "{{workflow_run_id}}",
+                    "workflow_id": "{{workflow_id}}",
+                    "workflow_name": "{{workflow_name}}",
+                    "status": "completed",
+                    "call_duration_seconds": "{{cost_info.call_duration_seconds}}",
+                    "phone_number": "{{initial_context.phone_number}}",
+                    "caller_number": "{{initial_context.caller_number}}",
+                    "recording_url": "{{recording_url}}",
+                    "transcript_url": "{{transcript_url}}",
+                    "initial_context": "{{initial_context}}",
+                    "gathered_context": "{{gathered_context}}",
+                    "cost_info": "{{cost_info}}",
+                    "annotations": "{{annotations}}",
+                },
+            },
+        }
+
+    async def _inject_webhook_node(self, workflow_id: int) -> None:
+        """Add a webhook node to an existing agent's workflow definition.
+
+        - Fetches the current workflow definition from Dograh
+        - Skips if a webhook node already exists (idempotent)
+        - Appends the Neuvon webhook node and updates the workflow
+        - Logs a warning and continues if BACKEND_PUBLIC_URL is not configured
+        """
+        settings = get_settings()
+        base_url = (settings.BACKEND_PUBLIC_URL or "").rstrip("/")
+
+        if not base_url:
+            logger.warning(
+                "agent.webhook_inject_skipped",
+                workflow_id=workflow_id,
+                reason="BACKEND_PUBLIC_URL not configured in .env",
+            )
+            return
+
+        webhook_url = f"{base_url}/api/v1/webhooks/dograh"
+
+        try:
+            agent = await self.dograh.get_agent(workflow_id)
+        except Exception as exc:
+            logger.warning(
+                "agent.webhook_inject_fetch_failed",
+                workflow_id=workflow_id,
+                error=str(exc),
+            )
+            return
+
+        definition = agent.get("workflow_definition") or {}
+        nodes = definition.get("nodes") or []
+        edges = definition.get("edges") or []
+
+        # Idempotency: skip if we already have a webhook node pointing at our endpoint
+        existing_urls = [
+            n.get("data", {}).get("endpoint_url", "")
+            for n in nodes
+            if n.get("type") == "webhook"
+        ]
+        if webhook_url in existing_urls:
+            logger.info(
+                "agent.webhook_already_present",
+                workflow_id=workflow_id,
+            )
+            return
+
+        # Append webhook node
+        nodes.append(self._build_webhook_node(webhook_url))
+        updated_definition = {"nodes": nodes, "edges": edges}
+
+        try:
+            await self.dograh.update_agent(
+                workflow_id,
+                {"workflow_definition": updated_definition},
+            )
+            logger.info(
+                "agent.webhook_injected",
+                workflow_id=workflow_id,
+                webhook_url=webhook_url,
+            )
+        except Exception as exc:
+            # Non-fatal: agent still works, we just won't get post-call webhooks
+            logger.warning(
+                "agent.webhook_inject_update_failed",
+                workflow_id=workflow_id,
+                error=str(exc),
+            )

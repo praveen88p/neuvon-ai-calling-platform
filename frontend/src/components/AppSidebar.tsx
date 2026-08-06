@@ -12,6 +12,7 @@ import {
   LogOut,
   Shield,
   FileText,
+  BookOpen,
 } from "lucide-react";
 import { NavLink } from "@/components/NavLink";
 import { useLocation, useNavigate } from "react-router-dom";
@@ -42,6 +43,7 @@ const mainItems = [
   { title: "Call History", url: "/call-history", icon: History },
   { title: "Analytics", url: "/analytics", icon: BarChart3 },
   { title: "Appointments", url: "/appointments", icon: Calendar },
+  { title: "Knowledge Base", url: "/knowledge-base", icon: BookOpen },
   { title: "Phone Numbers", url: "/phone-numbers", icon: Phone },
   { title: "Settings", url: "/settings", icon: Settings },
 ];

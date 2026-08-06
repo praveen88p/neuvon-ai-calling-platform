@@ -13,6 +13,8 @@ from app.schemas.agent import (
     AgentListResponse,
     AgentStatusUpdate,
     AgentUpdate,
+    TestCallCreate,
+    TestCallResponse,
     TestRunCreate,
 )
 from app.schemas.auth import UserContext
@@ -118,6 +120,25 @@ async def create_test_run(
     """Create a test run without placing a real call."""
     service = AgentService()
     return await service.create_test_run(workflow_id, data, current_user)
+
+
+@router.post(
+    "/{workflow_id}/test-call",
+    response_model=TestCallResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def trigger_test_call(
+    workflow_id: int,
+    data: TestCallCreate,
+    current_user: Annotated[UserContext, Depends(get_current_user)],
+) -> TestCallResponse:
+    """Trigger a real phone call to test the agent.
+
+    Provider-agnostic: routes through whatever telephony provider
+    is configured on the agent in Dograh.
+    """
+    service = AgentService()
+    return await service.trigger_test_call(workflow_id, data, current_user)
 
 
 @router.get("/{workflow_id}/runs")

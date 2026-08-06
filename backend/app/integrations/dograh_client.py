@@ -14,10 +14,10 @@ class DograhClient:
     X-API-Key header authentication.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, api_key: str | None = None) -> None:
         settings = get_settings()
         self.base_url = settings.DOGRAH_BASE_URL
-        self.api_key = settings.DOGRAH_API_KEY
+        self.api_key = api_key or settings.DOGRAH_API_KEY
 
     async def _request(self, method: str, path: str, **kwargs) -> dict:
         """Make authenticated request to Dograh API."""
@@ -118,9 +118,16 @@ class DograhClient:
         return await self._request("POST", f"/workflow/{workflow_id}/validate")
 
     async def create_test_run(self, workflow_id: int, data: dict | None = None) -> dict:
-        """POST /workflow/{workflow_id}/runs — test run without real call."""
+        """POST /workflow/{workflow_id}/runs — create a test run.
+
+        Dograh requires `mode` and `name` in the body (confirmed by live API test:
+        sending {} returns 422 with 'mode' and 'name' as required fields).
+        """
+        body: dict = {"mode": "test", **(data or {})}
+        if "name" not in body:
+            body["name"] = "Test Run"
         return await self._request(
-            "POST", f"/workflow/{workflow_id}/runs", json=data or {}
+            "POST", f"/workflow/{workflow_id}/runs", json=body
         )
 
     async def list_workflow_runs(
@@ -325,5 +332,132 @@ class DograhClient:
         return await self._request(
             "POST",
             f"/organizations/telephony-configs/{config_id}/phone-numbers/{phone_number_id}/set-default-caller",
+        )
+
+    # ── Outbound Call Trigger ─────────────────────────────────────────────
+
+    async def trigger_outbound_call(
+        self,
+        workflow_uuid: str,
+        phone_number: str,
+        initial_context: dict | None = None,
+    ) -> dict:
+        """POST /public/agent/workflow/{workflow_uuid} — trigger a real outbound call.
+
+        This is provider-agnostic: Dograh routes through whatever telephony
+        provider (Plivo, Twilio, Vobiz, etc.) is configured on the agent.
+
+        NOTE: The path is /public/agent/workflow/{uuid}, NOT /public/agent/{uuid}.
+        The existing trigger_call method uses the same path and is verified working.
+        """
+        body: dict = {"phone_number": phone_number}
+        if initial_context:
+            body["initial_context"] = initial_context
+        return await self._request(
+            "POST", f"/public/agent/workflow/{workflow_uuid}", json=body
+        )
+
+    # --- Knowledge Base methods (Feature KB) ---
+
+    async def kb_get_upload_url(self, filename: str, mime_type: str) -> dict:
+        """POST /knowledge-base/upload-url — get presigned S3 URL for direct browser upload.
+
+        Returns: { upload_url, document_uuid, s3_key }
+        """
+        return await self._request(
+            "POST",
+            "/knowledge-base/upload-url",
+            json={"filename": filename, "mime_type": mime_type},
+        )
+
+    async def kb_process_document(
+        self,
+        document_uuid: str,
+        s3_key: str,
+        retrieval_mode: str = "chunked",
+    ) -> dict:
+        """POST /knowledge-base/process-document — trigger chunking + embedding after S3 upload.
+
+        Status will move: pending → processing → completed | failed (async).
+        """
+        return await self._request(
+            "POST",
+            "/knowledge-base/process-document",
+            json={
+                "document_uuid": document_uuid,
+                "s3_key": s3_key,
+                "retrieval_mode": retrieval_mode,
+            },
+        )
+
+    async def kb_list_documents(
+        self,
+        limit: int = 100,
+        offset: int = 0,
+        status: str | None = None,
+    ) -> dict:
+        """GET /knowledge-base/documents — list all documents for the authenticated org."""
+        params: dict = {"limit": limit, "offset": offset}
+        if status:
+            params["status"] = status
+        return await self._request("GET", "/knowledge-base/documents", params=params)
+
+    async def kb_get_document(self, document_uuid: str) -> dict:
+        """GET /knowledge-base/documents/{uuid} — get a single document's details."""
+        return await self._request("GET", f"/knowledge-base/documents/{document_uuid}")
+
+    async def kb_delete_document(self, document_uuid: str) -> None:
+        """DELETE /knowledge-base/documents/{uuid} — soft-delete a document and its chunks."""
+        await self._request("DELETE", f"/knowledge-base/documents/{document_uuid}")
+
+    async def kb_search(
+        self,
+        query: str,
+        limit: int = 5,
+        document_uuids: list[str] | None = None,
+    ) -> dict:
+        """POST /knowledge-base/search — vector similarity search across org documents."""
+        body: dict = {"query": query, "limit": limit}
+        if document_uuids:
+            body["document_uuids"] = document_uuids
+        return await self._request("POST", "/knowledge-base/search", json=body)
+
+    # --- Agent ↔ Document methods (Phase 2) ---
+
+    async def get_agent_document_uuids(self, workflow_id: int) -> list[str]:
+        """Read document_uuids from an agent's agentNodes.
+
+        Fetches the full workflow definition and extracts document_uuids
+        from the first agentNode found (they are expected to be consistent
+        across all agentNodes in a workflow).
+        """
+        agent = await self.get_agent(workflow_id)
+        definition = agent.get("workflow_definition") or {}
+        nodes = definition.get("nodes") or []
+        for node in nodes:
+            if node.get("type") == "agentNode":
+                return node.get("data", {}).get("document_uuids") or []
+        return []
+
+    async def set_agent_document_uuids(
+        self, workflow_id: int, document_uuids: list[str]
+    ) -> dict:
+        """Update document_uuids on ALL agentNodes in a workflow.
+
+        Documents attached here are available throughout the entire conversation.
+        Fetches current definition, updates every agentNode, then PUTs the workflow.
+        """
+        agent = await self.get_agent(workflow_id)
+        definition = agent.get("workflow_definition") or {}
+        nodes = definition.get("nodes") or []
+        edges = definition.get("edges") or []
+
+        for node in nodes:
+            if node.get("type") == "agentNode":
+                node.setdefault("data", {})["document_uuids"] = document_uuids
+
+        return await self.update_agent(
+            workflow_id,
+            {"workflow_definition": {"nodes": nodes, "edges": edges}},
         )
 

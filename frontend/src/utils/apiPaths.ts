@@ -48,6 +48,13 @@ export const API_PATHS = {
   // ── Appointments ──
   APPOINTMENTS: "/api/v1/appointments",
 
+  // ── Knowledge Base ──
+  KB_UPLOAD:     "/api/v1/knowledge-base/upload",
+  KB_UPLOAD_URL: "/api/v1/knowledge-base/upload-url",
+  KB_PROCESS:    "/api/v1/knowledge-base/process",
+  KB_DOCUMENTS:  "/api/v1/knowledge-base/documents",
+  KB_SEARCH:     "/api/v1/knowledge-base/search",
+
   // ── Availability ──
   AVAILABILITY_SCHEDULE: "/api/v1/availability/schedule",
   AVAILABILITY_OVERRIDES: "/api/v1/availability/overrides",
@@ -89,6 +96,10 @@ export const agentValidatePath = (workflowId: number | string) =>
 /** POST /api/v1/agents/{workflow_id}/test-run */
 export const agentTestRunPath = (workflowId: number | string) =>
   `/api/v1/agents/${workflowId}/test-run`;
+
+/** POST /api/v1/agents/{workflow_id}/test-call — trigger real phone call */
+export const agentTestCallPath = (workflowId: number | string) =>
+  `/api/v1/agents/${workflowId}/test-call`;
 
 /** GET /api/v1/agents/{workflow_id}/runs */
 export const agentRunsPath = (workflowId: number | string) =>
@@ -161,3 +172,11 @@ export const memberPath = (userId: string) =>
 /** DELETE /api/v1/organizations/me/members/{member_id} */
 export const teamMemberPath = (memberId: string) =>
   `/api/v1/organizations/me/members/${memberId}`;
+
+/** GET/DELETE /api/v1/knowledge-base/documents/{uuid} */
+export const kbDocumentPath = (uuid: string) =>
+  `/api/v1/knowledge-base/documents/${uuid}`;
+
+/** GET/PUT /api/v1/knowledge-base/agents/{workflow_id}/documents */
+export const kbAgentDocumentsPath = (workflowId: number | string) =>
+  `/api/v1/knowledge-base/agents/${workflowId}/documents`;
