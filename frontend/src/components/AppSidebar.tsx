@@ -13,6 +13,7 @@ import {
   Shield,
   FileText,
   BookOpen,
+  Link2,
 } from "lucide-react";
 import { NavLink } from "@/components/NavLink";
 import { useLocation, useNavigate } from "react-router-dom";
@@ -45,6 +46,7 @@ const mainItems = [
   { title: "Appointments", url: "/appointments", icon: Calendar },
   { title: "Knowledge Base", url: "/knowledge-base", icon: BookOpen },
   { title: "Phone Numbers", url: "/phone-numbers", icon: Phone },
+  { title: "Integrations", url: "/integrations", icon: Link2 },
   { title: "Settings", url: "/settings", icon: Settings },
 ];
 

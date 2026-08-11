@@ -22,6 +22,7 @@ import Appointments from "./pages/Appointments";
 import KnowledgeBase from "./pages/KnowledgeBase";
 import Settings from "./pages/Settings";
 import PhoneNumbers from "./pages/PhoneNumbers";
+import Integrations from "./pages/Integrations";
 import Logs from "./pages/admin/Logs";
 import AuditTrail from "./pages/admin/AuditTrail";
 import NotFound from "./pages/NotFound";
@@ -87,6 +88,7 @@ const App = () => (
                         <Route path="/knowledge-base" element={<KnowledgeBase />} />
                         <Route path="/settings" element={<Settings />} />
                         <Route path="/phone-numbers" element={<PhoneNumbers />} />
+                        <Route path="/integrations" element={<Integrations />} />
                         <Route path="/admin/logs" element={<Logs />} />
                         <Route path="/admin/audit" element={<AuditTrail />} />
                         <Route path="*" element={<NotFound />} />

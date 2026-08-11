@@ -136,6 +136,53 @@ class WebhookService:
             except Exception as exc:
                 logger.warning("webhook.appointment_extract_failed", error=str(exc))
 
+        # Auto-write results back to Google Sheet if call came from a sheet lead
+        if payload.status in ("completed", "failed") and run_id:
+            try:
+                sheet_lead = await self._find_sheet_lead_by_run_id(run_id)
+                if sheet_lead:
+                    from app.services.sheet_service import SheetService
+
+                    sheet_svc = SheetService()
+                    gathered = payload.gathered_context or {}
+
+                    # Parse callback_time via CallbackService for proper retry logic
+                    raw_callback_time = gathered.get("callback_time") or gathered.get("callback_requested_at")
+                    callback_iso: str | None = None
+
+                    if raw_callback_time:
+                        from app.services.callback_service import CallbackService
+                        from app.utils.callback_parser import parse_callback_time
+
+                        cb_dt = parse_callback_time(str(raw_callback_time))
+                        if cb_dt:
+                            callback_iso = cb_dt.isoformat()
+                            # Create the scheduled_callbacks record
+                            cb_svc = CallbackService()
+                            await cb_svc.schedule_from_raw(
+                                org_id=str(sheet_lead.get("organization_id", "")),
+                                phone_number=sheet_lead["phone_number"],
+                                workflow_id=0,  # resolved inside CallbackService via sheet conn
+                                raw_callback_time=str(raw_callback_time),
+                                initial_context=gathered,
+                                sheet_lead_id=str(sheet_lead["id"]),
+                            )
+
+                    await sheet_svc.write_call_results(
+                        lead_id=str(sheet_lead["id"]),
+                        call_status=payload.status,
+                        call_summary=gathered.get("call_summary", ""),
+                        lead_tag=gathered.get("lead_tag", ""),
+                        callback_time=callback_iso,
+                        duration_seconds=payload.duration_seconds,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "webhook.sheet_writeback_failed",
+                    run_id=run_id,
+                    error=str(exc),
+                )
+
         logger.info(
             "webhook.processed",
             run_id=run_id,
@@ -162,6 +209,25 @@ class WebhookService:
             return rows[0] if rows else None
         except Exception as exc:
             logger.warning("webhook.run_lookup_failed", run_id=run_id, error=str(exc))
+            return None
+
+    async def _find_sheet_lead_by_run_id(self, run_id: int) -> dict | None:
+        """Check if a Dograh run originated from a sheet lead."""
+        try:
+            result = (
+                await self.db.database.from_("sheet_leads")
+                .select("*")
+                .eq("dograh_run_id", run_id)
+                .execute()
+            )
+            rows = result if isinstance(result, list) else []
+            return rows[0] if rows else None
+        except Exception as exc:
+            logger.debug(
+                "webhook.sheet_lead_lookup_failed",
+                run_id=run_id,
+                error=str(exc),
+            )
             return None
 
     async def _update_existing_run(

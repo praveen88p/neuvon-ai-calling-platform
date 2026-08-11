@@ -180,3 +180,49 @@ export const kbDocumentPath = (uuid: string) =>
 /** GET/PUT /api/v1/knowledge-base/agents/{workflow_id}/documents */
 export const kbAgentDocumentsPath = (workflowId: number | string) =>
   `/api/v1/knowledge-base/agents/${workflowId}/documents`;
+
+// ── Sheet Integrations ──
+export const SHEET_CONNECTIONS      = "/api/v1/sheets/connections";
+export const SHEET_DETECT_COLUMNS   = "/api/v1/sheets/detect-columns";
+
+/** GET/PATCH/DELETE /api/v1/sheets/connections/{id} */
+export const sheetConnectionPath = (id: string) =>
+  `/api/v1/sheets/connections/${id}`;
+
+/** POST /api/v1/sheets/connections/{id}/pause */
+export const sheetPausePath = (id: string) =>
+  `/api/v1/sheets/connections/${id}/pause`;
+
+/** POST /api/v1/sheets/connections/{id}/resume */
+export const sheetResumePath = (id: string) =>
+  `/api/v1/sheets/connections/${id}/resume`;
+
+/** POST /api/v1/sheets/connections/{id}/poll-now */
+export const sheetPollNowPath = (id: string) =>
+  `/api/v1/sheets/connections/${id}/poll-now`;
+
+/** GET /api/v1/sheets/connections/{id}/leads */
+export const sheetLeadsPath = (id: string) =>
+  `/api/v1/sheets/connections/${id}/leads`;
+
+/** GET /api/v1/sheets/connections/{id}/stats */
+export const sheetStatsPath = (id: string) =>
+  `/api/v1/sheets/connections/${id}/stats`;
+
+/** GET /api/v1/sheets/connections/{id}/callbacks */
+export const sheetCallbacksPath = (id: string) =>
+  `/api/v1/sheets/connections/${id}/callbacks`;
+
+/** POST /api/v1/sheets/callbacks/{id}/cancel */
+export const cancelCallbackPath = (callbackId: string) =>
+  `/api/v1/sheets/callbacks/${callbackId}/cancel`;
+
+/** GET /api/v1/sheets/callbacks */
+export const SHEET_CALLBACKS = "/api/v1/sheets/callbacks";
+
+/** GET /api/v1/sheets/connections/{id}/audit */
+export const sheetAuditPath = (id: string) =>
+  `/api/v1/sheets/connections/${id}/audit`;
+
+/** GET /api/v1/sheets/audit */
+export const SHEET_AUDIT = "/api/v1/sheets/audit";

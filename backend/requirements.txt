@@ -34,3 +34,12 @@ structlog>=24.4.0
 
 # Error Tracking
 sentry-sdk[fastapi]>=2.0.0
+
+# Google Sheets Integration
+google-api-python-client>=2.198.0
+google-auth>=2.56.0
+google-auth-httplib2>=0.4.0
+
+# Datetime parsing (Phase 3 — callback scheduling)
+python-dateutil>=2.9.0
+pytz>=2024.1

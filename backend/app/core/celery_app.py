@@ -29,4 +29,19 @@ def get_celery_app() -> Celery:
         worker_prefetch_multiplier=1,
     )
 
+    # Auto-discover tasks in app.tasks package
+    app.autodiscover_tasks(["app.tasks"])
+
+    # Celery Beat schedule — periodic background jobs
+    app.conf.beat_schedule = {
+        "poll-sheet-connections": {
+            "task": "sheets.poll_all",
+            "schedule": 60.0,  # every 60 seconds
+        },
+        "check-scheduled-callbacks": {
+            "task": "sheets.check_callbacks",
+            "schedule": 60.0,  # every 60 seconds
+        },
+    }
+
     return app

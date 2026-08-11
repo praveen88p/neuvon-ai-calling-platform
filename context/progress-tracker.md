@@ -6,11 +6,47 @@ Update this file after every completed feature. Any AI agent reading this should
 
 ## Current Status
 
-**Phase:** Settings Page Refactor (COMPLETE)
-**Last completed:** Settings page refactored for production
+**Phase:** Google Sheets Integration — ALL 4 PHASES COMPLETE ✅
+**Last completed:** Phase 4 — Rate limiting, Error recovery, Duplicate detection, Audit logging
 **Next:** Super admin panel / data verification
 
 ---
+
+## Sheet Integration Phases
+
+### Phase 1 — Backend Core ✅
+- Migration `009_sheet_connections.sql` (3 tables: sheet_connections, sheet_leads, scheduled_callbacks)
+- `GoogleSheetsClient` wrapper (`asyncio.to_thread()`, batch updates, header detection)
+- `SheetService` (connection CRUD + detect columns + poll for new leads + write-back)
+- 9 API endpoints under `/api/v1/sheets/`
+- Celery Beat tasks: `sheets.poll_all` + `sheets.check_callbacks`
+- Webhook write-back integration
+
+### Phase 2 — Frontend UI ✅
+- `types/sheets.ts` — TypeScript interfaces
+- `ConnectSheetModal.tsx` — 3-step wizard (credentials → column mapping → agent select)
+- `SheetConnectionCard.tsx` — card with stats, progress bar, lead list
+- `Integrations.tsx` — main page at `/integrations`
+- Route + sidebar nav registered
+
+### Phase 3 — Callback Scheduling ✅
+- Migration `010_callback_improvements.sql` — retry_count, display_time, failed status
+- `CallbackService` — full lifecycle (schedule, fire, retry up to 2x, cancel, list)
+- `callback_parser.py` — NLP datetime parser ("tomorrow 5pm", "in 2 hours", ISO 8601)
+- 3 callback endpoints (list-all, list-per-connection, cancel)
+- `CallbacksPanel.tsx` — Leads/Callbacks tab in connection card
+- Celery check_callbacks delegated to CallbackService with retry logic
+
+### Phase 4 — Polish ✅
+- Migration `011_sheet_phase4.sql` — audit log table + rate limit/duplicate/reauth columns
+- `SheetAuditService` — append-only event log with 20+ typed event constants
+- **Rate limiting** — max concurrent calls per connection (configurable, default 5)
+- **Duplicate detection** — skip phone re-called within window (configurable, default 24h)
+- **Error recovery** — auth errors → `needs_reauth` flag + auto-pause after 5 consecutive fails
+- **Audit logging** — all events (connection CRUD, lead detect, call trigger, skip, errors)
+- 2 audit endpoints (`/connections/{id}/audit`, `/audit`)
+- Frontend: `needs_reauth` amber banner + consecutive error counter in card
+- 12 total endpoints live
 
 ## Progress
 

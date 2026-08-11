@@ -165,6 +165,102 @@ class DograhClient:
         """GET /organizations/usage/runs — paginated run list with usage data."""
         return await self._request("GET", "/organizations/usage/runs", params=params)
 
+    async def ensure_webhook_node(self, workflow_id: int, webhook_url: str) -> bool:
+        """Inject or update a webhook node in a Dograh agent's workflow definition.
+
+        Fetches the current workflow, checks if a webhook node pointing to our
+        backend already exists, and if not adds one. This is idempotent — calling
+        it multiple times is safe.
+
+        Returns True if the webhook was added/updated, False if already present.
+        """
+        import uuid as _uuid
+
+        try:
+            agent = await self.get_agent(workflow_id)
+            wf_def = agent.get("workflow_definition") or {}
+            nodes: list = wf_def.get("nodes", [])
+            edges: list = wf_def.get("edges", [])
+
+            neuvon_marker = "neuvon-webhook"
+
+            # Check if our webhook node already exists and is current
+            for node in nodes:
+                if (
+                    node.get("type") == "webhook"
+                    and node.get("id", "").startswith(neuvon_marker)
+                ):
+                    existing_url = node.get("data", {}).get("endpoint_url", "")
+                    if existing_url == webhook_url:
+                        logger.info(
+                            "dograh.webhook_node_exists",
+                            workflow_id=workflow_id,
+                            url=webhook_url,
+                        )
+                        return False  # Already configured correctly
+                    # URL changed — remove old node and edge, then re-add
+                    old_id = node["id"]
+                    nodes = [n for n in nodes if n["id"] != old_id]
+                    edges = [e for e in edges if e.get("source") != old_id and e.get("target") != old_id]
+                    break
+
+            # Find all endCall nodes to connect webhook before them
+            end_nodes = [n for n in nodes if n.get("type") == "endCall"]
+
+            webhook_node_id = f"{neuvon_marker}-{str(_uuid.uuid4())[:8]}"
+            webhook_node = {
+                "id": webhook_node_id,
+                "type": "webhook",
+                "position": {"x": 900, "y": 0},
+                "data": {
+                    "name": "Neuvon Result Webhook",
+                    "enabled": True,
+                    "http_method": "POST",
+                    "endpoint_url": webhook_url,
+                    "payload_template": {
+                        "run_id": "{{workflow_run_id}}",
+                        "workflow_id": "{{workflow_id}}",
+                        "status": "completed",
+                        "duration_seconds": "{{cost_info.call_duration_seconds}}",
+                        "gathered_context": "{{gathered_context}}",
+                        "recording_url": "{{recording_url}}",
+                        "transcript_url": "{{transcript_url}}",
+                    },
+                },
+            }
+            nodes.append(webhook_node)
+
+            # Add edges: each endCall → webhook node
+            for end_node in end_nodes:
+                edge_id = f"edge-neuvon-{str(_uuid.uuid4())[:8]}"
+                edges.append({
+                    "id": edge_id,
+                    "source": end_node["id"],
+                    "target": webhook_node_id,
+                    "data": {
+                        "label": "Call ended",
+                        "condition": "The call has ended",
+                    },
+                })
+
+            updated_def = {"nodes": nodes, "edges": edges}
+            await self.update_agent(workflow_id, {"workflow_definition": updated_def})
+
+            logger.info(
+                "dograh.webhook_node_added",
+                workflow_id=workflow_id,
+                url=webhook_url,
+            )
+            return True
+
+        except Exception as exc:
+            logger.warning(
+                "dograh.webhook_node_failed",
+                workflow_id=workflow_id,
+                error=str(exc),
+            )
+            return False
+
     # --- Campaign methods (Feature 08) ---
 
     async def get_presigned_upload_url(
