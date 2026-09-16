@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException, status
 
+from app.core.config import get_settings
 from app.core.logging import logger
 from app.integrations.dograh_client import DograhClient
 from app.integrations.google_sheets_client import (
